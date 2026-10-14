@@ -46,6 +46,7 @@ class Device:
     write_error: bool = False
     disconnect_error: bool = False
     stay_connected: bool = False
+    drop_queries_after_write: int = 0
     active: int = 0
     max_active: int = 0
     connections: int = 0
@@ -90,6 +91,11 @@ class FakeClient:
         frame = parse_frame(data)
         await asyncio.sleep(0)
         if frame.command == 0xE2:
+            if self.device.writes and self.device.drop_queries_after_write > 0:
+                self.device.drop_queries_after_write -= 1
+                for item in (self.device.ea, self.device.e9, self.device.fa):
+                    self.callback(None, bytearray(item))
+                return
             for item in (self.device.e2, self.device.ea, self.device.e9, self.device.fa):
                 self.callback(None, bytearray(item))
             return
@@ -123,6 +129,7 @@ def manager(device: Device) -> SessionManager:
         flush_confirm_timeout=0.2,
         settle_time=0,
         poll_gap=0,
+        resend_interval=0.03,
     )
 
 
@@ -153,6 +160,12 @@ class SessionTests(unittest.TestCase):
         snap = run(manager(device).command(SetSettings({"auto_cover": False})))
         self.assertFalse(snap.settings.auto_cover)
         self.assertEqual(device.writes[0].hex(), "f3f40f9221194252b3300010000000000062fc")
+
+    def test_query_dropped_after_write_is_resent(self):
+        device = Device(drop_queries_after_write=2)
+        snap = run(manager(device).command(SetSettings({"auto_cover": False})))
+        self.assertFalse(snap.settings.auto_cover)
+        self.assertEqual(len(device.writes), 1)  # only the setting write, never retried
 
     def test_option_write(self):
         device = Device(fa=with_byte(FA, 5, 0x12))  # UV off

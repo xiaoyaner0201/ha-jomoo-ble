@@ -166,6 +166,7 @@ class SessionManager:
         flush_confirm_timeout: float = 6.0,
         settle_time: float = 0.4,
         poll_gap: float = 0.4,
+        resend_interval: float = 2.0,
     ) -> None:
         self._connect = connect
         self._lock = asyncio.Lock()
@@ -176,6 +177,7 @@ class SessionManager:
         self.flush_confirm_timeout = flush_confirm_timeout
         self.settle_time = settle_time
         self.poll_gap = poll_gap
+        self.resend_interval = resend_interval
 
     @property
     def blocked(self) -> bool:
@@ -232,13 +234,20 @@ class SessionManager:
             await client.write_gatt_char(CHARACTERISTIC, filter_query(), response=False)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.response_timeout
+        resend_at = loop.time() + self.resend_interval
         while not all(c in window.frames for c in REQUIRED):
-            remaining = deadline - loop.time()
+            now = loop.time()
+            remaining = deadline - now
             if remaining <= 0:
                 missing = [f"0x{c:02X}" for c in REQUIRED if c not in window.frames]
                 raise SessionError("Fresh status incomplete: missing " + ", ".join(missing))
+            if now >= resend_at:
+                # The toilet can drop a query that arrives while it is applying a
+                # write; asking again is read-only and safe.
+                await client.write_gatt_char(CHARACTERISTIC, state_query(), response=False)
+                resend_at = now + self.resend_interval
             try:
-                await asyncio.wait_for(window.event.wait(), remaining)
+                await asyncio.wait_for(window.event.wait(), min(remaining, resend_at - now))
             except asyncio.TimeoutError:
                 continue
             window.event.clear()
