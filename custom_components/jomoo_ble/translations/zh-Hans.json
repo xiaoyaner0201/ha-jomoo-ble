@@ -1,0 +1,35 @@
+{
+  "title": "九牧 BLE",
+  "config": {
+    "step": {
+      "user": {
+        "title": "九牧 ZS800J BLE",
+        "description": "先关闭官方小程序。输入可连接 HA 蓝牙适配器/代理广播看到的 BLE MAC，不是 macOS CoreBluetooth UUID。设置时只读查询，动作默认禁用。",
+        "data": {
+          "address": "BLE MAC 地址",
+          "name_prefix": "广播名称前缀"
+        }
+      }
+    },
+    "error": {
+      "invalid_address": "请输入六组冒号分隔的两位十六进制数。",
+      "invalid_prefix": "必须输入广播前缀。",
+      "cannot_connect": "无法取得新鲜 E2/EA 状态，请检查型号、代理位置和 BLE 单连接限制。"
+    },
+    "abort": {
+      "already_configured": "该设备已经配置。"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "轮询与动作",
+        "description": "先核对精确型号和只读状态，再允许控制。翻盖/座圈会运动，小冲会用水。未映射设置仍拒绝写入。连接可能鸣叫，轮询与官方小程序共享唯一 BLE 连接。",
+        "data": {
+          "enable_controls": "启用已验证的机械动作",
+          "poll_interval": "轮询间隔（秒，30–3600）"
+        }
+      }
+    }
+  }
+}

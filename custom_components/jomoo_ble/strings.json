@@ -1,0 +1,35 @@
+{
+  "title": "JOMOO BLE",
+  "config": {
+    "step": {
+      "user": {
+        "title": "JOMOO ZS800J BLE",
+        "description": "Close the official mini program. Enter the BLE MAC advertised via a connectable Home Assistant adapter/proxy, not a macOS CoreBluetooth UUID. Setup performs read-only status queries; controls start disabled.",
+        "data": {
+          "address": "BLE MAC address",
+          "name_prefix": "Advertised name prefix"
+        }
+      }
+    },
+    "error": {
+      "invalid_address": "Enter six two-digit hexadecimal groups separated by colons.",
+      "invalid_prefix": "A name prefix is required.",
+      "cannot_connect": "Unable to obtain fresh E2/EA status. Check model, proxy placement and the single-central constraint."
+    },
+    "abort": {
+      "already_configured": "This device is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Polling and controls",
+        "description": "Enable controls only after checking read-only status on your exact model. Lid/ring commands move hardware and small flush uses water. Unmapped settings still block all writes. Connections can beep; polling shares the single BLE slot with the official app.",
+        "data": {
+          "enable_controls": "Enable verified mechanical controls",
+          "poll_interval": "Polling interval (seconds, 30–3600)"
+        }
+      }
+    }
+  }
+}
