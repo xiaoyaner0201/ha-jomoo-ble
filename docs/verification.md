@@ -1,26 +1,57 @@
-# Verification scope
+# Verification record
 
-Local offline execution for this preview:
+This record keeps three layers of evidence separate: offline tests, a real Home
+Assistant runtime, and physical hardware.
 
-- Python 3.13: `python -m unittest discover -s tests -v` — **25 tests, OK**.
-- Python 3.14: same command — **25 tests, OK**.
-- `python scripts/check_repository.py` — **20 Python files passed py_compile**;
-  JSON, relative documentation links and basic public-data hygiene passed.
-- `python scripts/sync_library.py --check` — bundled library byte-identical.
-- Ruff 0.15.4: `ruff check .` — **All checks passed!**
-- `git diff --check` — no whitespace errors.
+## Offline (CI)
 
-The transport is synthetic in the tests; no radio or Home Assistant server was
-started. The known frame fixtures originate in prior exact-model evidence, not
-in a claim that this new integration has been deployed.
+- `python -m unittest discover -s tests -v` runs 38 tests on Python 3.13 and 3.14.
+  - Every decoder is checked against the hardware fixtures.
+  - All seven verified function-frame vectors are reproduced byte for byte.
+  - A single-field change only touches its own bits.
+  - Read-only fields and out-of-range values are refused, and option frames are covered.
+  - Session gates are checked: busy, seated, moving or in-transit states are refused;
+    an unrelated setting change raises with a diff; an unconfirmed action or flush is
+    reported as such; a failed write is not retried.
+  - Disconnect uncertainty blocks further connections, and the lock serialises sessions.
+  - The shower-guard truth table is covered, including a failed suspend that keeps the
+    original value, so a retry cannot record "was off" by mistake.
+- `scripts/check_repository.py` compiles every source, parses JSON and checks local
+  links. It also rejects any non-fictional MAC address, private IPv4 address, private
+  path or vendor package.
+- `scripts/sync_library.py --check` confirms the bundled `lib/` is byte-identical to
+  the canonical library.
+- `ruff check .` and `ruff format --check .` pass.
 
-An attempt to install Home Assistant 2026.10.0 in an isolated, credential-free
-local virtual environment timed out during dependency retrieval. Home Assistant
-API imports/config flow execution and hassfest have therefore **not been
-verified** here. This blocker does not invalidate the standard-library tests or
-syntax checks, and is not replaced with mocked “HA live success”.
+## Home Assistant runtime (real HA 2026.9.1 container, isolated temp config, fake toilet)
 
-Remaining acceptance gates: deploying maintainer's independent code review,
-actual HA setup/unload and proxy routing, device/firmware profile regression,
-filter/occupancy/arbitrary-setting mappings, and real heater hot-water flow
-linkage. Publishing CI has not run on GitHub; only the local gates above have.
+`tests/ha_smoke/smoke_in_ha_container.py` checks the following:
+
+- The manifest and Bluetooth matcher load, and en / zh-Hans translations resolve
+  (52 entity strings each).
+- A config flow with a bad MAC returns the form error; a valid one creates the entry
+  with a single connection.
+- Setup makes no extra connection. Entities start as *unknown*, not unavailable.
+- The Refresh button fills lid, ring, filter (91.6 %), work status (standby), seated and
+  last refresh.
+- With controls disabled, the guard service is refused. With controls enabled, the
+  options flow rejects a poll interval of 60 and accepts 0.
+- Shower guard:
+  - `suspend_auto_cover` writes the verified *off* frame, giving
+    `guard_active: true, guard_previous: true`;
+  - `resume_auto_cover` writes the verified *on* frame and clears the guard.
+- The open-lid and small-flush buttons are confirmed by read-back.
+- The `jomoo_ble.refresh` service connects once.
+- Diagnostics redact the address, and unload succeeds.
+
+## Hardware (one ZS800J, ESPHome proxy beside the toilet)
+
+Verified with read-back and with all other settings unchanged:
+- status query;
+- open and close lid;
+- open and close seat ring;
+- small flush (also heard by the owner);
+- automatic lid opening off and on.
+
+Not yet exercised on hardware: the experimental switches and numbers, large flush, and
+the shower guard driven by a real water-heater signal.

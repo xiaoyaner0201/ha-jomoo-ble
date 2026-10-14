@@ -1,161 +1,200 @@
 # ha-jomoo-ble
 
-[简体中文](README.zh-CN.md) · Apache-2.0 · Independent custom integration
+[简体中文](README.zh-CN.md) · Apache-2.0 · Unofficial Home Assistant custom integration
 
-Local Bluetooth control for the **JOMOO ZS800J** smart toilet, through Home
-Assistant Bluetooth and connectable BLE proxies. This is a development preview,
-not an official JOMOO integration or a claim of Home Assistant live acceptance.
+Local Bluetooth control of the **JOMOO ZS800J** smart toilet from Home Assistant, through
+any connectable HA Bluetooth adapter or an ESPHome Bluetooth proxy placed near the toilet.
+No cloud, no account, no vendor code.
 
-**Safety limit:** the first release only writes against the complete settings
-profile observed in the verified command transcripts. Other profiles remain
-read-only. It does not guess missing settings, fill them with defaults, or let an
-automatic-cover change reset temperatures, pressure, nozzle positions or auto flush.
+<!-- STORY:START -->
+## Why this exists
 
-## Exact-model evidence and development provenance
+Our toilet sits right next to the shower.
 
-The official **九牧智联 (JOMOO Smart)** WeChat mini program's model routing mapped
-model code **237369 → ZS800J / bleProtocol0**. The corresponding advertisement uses
-the `JOMOO_SMART_` family prefix and that model-code suffix. The code is model
-evidence, not a unique device identifier or BLE authentication mechanism.
+The JOMOO ZS800J has a handy *automatic lid opening* feature: walk up and the lid lifts by itself. During a shower, though, it misfires — someone standing nearby and drifting steam keep popping the lid open, right next to the running water.
 
-Development originally used the owner's authorized **official mini-program
-cache** to understand model selection and protocol behavior, then compared
-read-only responses and reversible actions on the exact device. This did not
-establish that macOS WeChat's UI can control the device. Wire facts and anonymized
-acceptance transcripts were handed to this implementation; all repository code
-was independently written. No vendor JavaScript, extracted package, private
-cache, account data or application assets are included or needed to run it.
+So the first and final goal of this project fits in one sentence:
 
-Prior exact-device evidence, **separate from this integration's acceptance**:
+> **While the water heater is delivering hot water, turn the toilet's automatic lid opening off; when the hot water stops, put it back the way it was.**
 
-- FFE0 service / FFE1 notify + write-without-response control channel.
-- `F3 F4` frame envelope, source `0x92`, toilet `0x21`, broadcast `0x00`.
-- E2 state query and E7 filter query returned valid status frames.
-- Open/close lid, open/close seat ring, small flush, and auto-cover off/on were
-  exercised on the device. Cover/ring position and auto-cover settings were read
-  back; small flush was physically observed, not inferred from a BLE write ACK.
-- ZS800J lid/ring state comes from **EA**, not E2 or a sibling model's decoder.
+"The way it was" matters: if automatic lid opening was already off before the shower, it stays off afterwards.
 
-These findings do **not** establish support for every JOMOO model, firmware,
-pressure/temperature combination or proxy. See [protocol evidence](docs/protocol.md).
+To get there, Home Assistant first had to really understand this toilet — hence this integration.
+<!-- STORY:END -->
 
-## Installation and configuration
+<!-- DEVLOG:START -->
+## How it was built (short version)
 
-1. Back up your HA configuration. Copy **the entire**
-   `custom_components/jomoo_ble` directory, including `lib`, into the matching
-   `custom_components` directory in your Home Assistant configuration. Restart HA.
-   The standalone wheel contains only the protocol library, not the HA component.
-2. Enable the built-in **Bluetooth** integration. For a remote ESPHome proxy,
-   enable active BLE connections; a passive scanner cannot control the toilet.
-   This component uses HA's selected connectable device/backend; it does not
-   connect to a proxy IP directly or need proxy credentials of its own.
-3. Place the proxy near the toilet with reasonable radio coverage. Distant weak
-   advertisements do not imply reliable connections. Avoid a wet enclosure and
-   mains wiring; do not put an unprotected proxy inside the toilet.
-4. Disconnect/close the official mini program first. Only **one BLE central** can
-   connect at once. Connections can make the toilet beep; choose an appropriate
-   polling interval (default 60 seconds; options allow 30–3600 seconds).
-5. Add **JOMOO BLE** in Settings → Devices & services. Enter your actual BLE MAC
-   locally and keep the default name prefix `JOMOO_SMART_`. A valid *fictional*
-   address is `02:00:00:00:00:01`; do not use that example as your device address.
-   A macOS CoreBluetooth UUID is not a MAC. Unsupported advertised model codes
-   are rejected. Setup performs read-only queries and then disconnects.
-6. Verify the read-only entities against the official app/remote first. Controls
-   are **disabled by default**. Enable them in integration options only with
-   someone present and a clear mechanism. If the verified-profile diagnostic is
-   off, write controls remain unavailable; do not change your device settings
-   merely to bypass the guard.
+1. **Reaching the device.** The toilet speaks Bluetooth only. An M5Stack CoreS3 running ESPHome serves as a Bluetooth proxy next to it: placed far away the signal was about -90 dBm and a connection took over ten seconds; beside the toilet it is about -68 dBm and connects in under a second.
+2. **The official WeChat mini program as the reference.** JOMOO's official controller is a WeChat mini program. We used it as the reference: which protocol revision this model uses and what each status field means — then verified everything with our own **read-only queries and read-back**, field by field, against the mini program and the physical toilet. That turned "guessing a protocol" into "checking against a reference". This repository contains and needs **no vendor code or mini-program files**; the implementation is written independently.
+3. **Step-by-step acceptance on the real device.** Read-only first, then reversible actions, then settings: open/close lid, open/close seat ring, small flush, automatic lid opening off/on — each verified on hardware. Every control frame carries the full settings block, so each write starts from a fresh read and is compared before/after to prove water/seat/dryer temperatures were not silently changed.
+4. **An accidental proof.** During the close-lid test the lid reopened a few seconds later — someone was standing in front of the toilet watching, and automatic lid opening did exactly what it does. That is precisely the problem this project solves.
+5. **Home Assistant.** Every connection makes the toilet beep, and only one central may connect at a time, so the integration does **not** poll by default; it connects briefly on refresh, on an action, or when an automation fires, and disconnects right away.
+6. **Shower guard.** Two services — suspend / resume automatic lid opening — remember the previous state; a blueprint wires in any "hot water is flowing" sensor.
+<!-- DEVLOG:END -->
 
-No public repository or HACS listing has been assumed in the manifest. Its
-documentation URL points to HA's Bluetooth prerequisites; project documentation
-is here. Maintainer identity, project URLs and release/HACS publication remain
-separate release decisions.
+## What you get
+
+- **Status on demand**: lid / seat ring position and motion, seated, flushing, work status,
+  water shortage, abnormal flow, sensor / overheat faults, filter remaining and hours,
+  foam liquid low, every settings level, and a last-refresh timestamp.
+- **Verified controls**: open / close lid, open / close seat ring, small flush, and the
+  automatic lid opening switch.
+- **Shower guard**: `jomoo_ble.suspend_auto_cover` / `jomoo_ble.resume_auto_cover`
+  services plus an automation blueprint. While hot water is flowing, automatic lid
+  opening is turned off; afterwards it is restored to exactly what it was.
+- **Experimental controls** (off by default): water / seat / dryer temperature levels,
+  rear wash pressure and nozzle position, dryer fan speed, wide-wash level, automatic
+  flush, automatic night light, UV water disinfection, close lid before flush, automatic
+  small flush, foot sensor, ambient light, large flush.
+
+## Hardware
+
+- A JOMOO ZS800J (advertises as `JOMOO_SMART_237369`). Other models are refused.
+- A connectable Bluetooth path from Home Assistant to the toilet: a local adapter, or an
+  [ESPHome Bluetooth proxy](https://esphome.io/components/bluetooth_proxy/) with
+  `active: true`. Bathrooms attenuate Bluetooth heavily; put the proxy close to the
+  toilet (in testing, -90 dBm through a wall was unusable, -68 dBm beside it connected
+  in under a second). Mind water and mains safety.
+
+## Two things to know first
+
+1. **Every connection makes the toilet beep.** The integration therefore never polls by
+   default. It connects only when you press *Refresh status*, call `jomoo_ble.refresh`,
+   or run a command, and disconnects immediately. You can opt in to slow polling
+   (300 s – 24 h) in the options.
+2. **Only one Bluetooth central at a time.** While Home Assistant is connected (a few
+   seconds), the official mini program cannot connect, and vice versa. Close the mini
+   program before setup.
+
+## Install
+
+**HACS (custom repository)**: HACS → Integrations → ⋮ → Custom repositories → add
+`https://github.com/xiaoyaner0201/ha-jomoo-ble` as *Integration*, install, restart.
+
+**Manual**: copy `custom_components/jomoo_ble` (including `lib/`) into your HA
+`config/custom_components/`, restart.
+
+Then *Settings → Devices & services*: the toilet is usually discovered automatically;
+otherwise *Add integration → JOMOO BLE* and enter its Bluetooth MAC (the field is
+pre-filled when a matching advertisement is visible). `02:00:00:00:00:01` is a fictional
+example. Setup performs one read-only query (one beep).
+
+## Options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| Enable verified controls | off | Lid, seat ring, small flush, automatic lid opening, shower guard |
+| Enable experimental controls | off | Everything marked *Experimental* below |
+| Automatic refresh interval | 0 (off) | 0, or 300 – 86400 seconds |
 
 ## Entities
 
-| Type | Surface | Limits |
+| Entity | Type | Status |
 | --- | --- | --- |
-| Sensors | Water/seat/air temperature **levels**, hip/woman pressure levels and nozzle positions | No °C inference. Values are exposed only when the complete verified E2 profile matches. |
-| Sensor | E9 work-status code | Raw code; no unverified washing/flush mode labels. |
-| Diagnostic sensors | Raw E2/E7/FA/E9 payloads | Disabled by default. Filter-life units/percentage are not yet mapped. |
-| Binary sensors | Lid open, seat ring open, lid moving, ring moving | EA read-back; unknown position stays unknown. |
-| Binary sensors | Automatic flush setting; verified parameter profile | Auto flush is read-only. |
-| Switch | Automatic cover on/off | Only the verified setting is writable. |
-| Buttons | Open lid, close lid, open seat ring, close seat ring, small flush | Fresh state required; no optimistic state. |
+| Refresh status | button | Verified (read-only) |
+| Open lid / Close lid / Open seat ring / Close seat ring | button | Verified |
+| Small flush | button | Verified |
+| Large flush | button | Experimental, disabled by default |
+| Automatic lid opening | switch | Verified; exposes `guard_active`, `guard_pending`, `guard_previous` |
+| Automatic flush, automatic night light | switch | Experimental, disabled by default |
+| UV water disinfection, close lid before flush, automatic small flush, foot sensor, ambient light | switch | Experimental, disabled by default |
+| Water / seat / dryer temperature level, rear wash pressure, rear nozzle position, dryer fan speed, wide-wash level | number | Experimental, disabled by default (device levels, not °C) |
+| Lid, Seat ring, Lid moving, Seat ring moving, Seated, Flushing | binary sensor | Read-only |
+| Water shortage, Abnormal water flow, Sensor or overheat fault, Filter needs replacement, Foam liquid low | binary sensor | Read-only |
+| Shower guard active | binary sensor | Read-only |
+| Status, Filter remaining (%), Filter used (h), Front wash pressure / nozzle, Last refresh | sensor | Read-only |
+| Raw E2 / FA / E9 / EA / E7 | sensor | Diagnostic, disabled by default |
 
-Opening the ring also opens the lid on the verified model. Closing the ring
-leaves the lid open. The observed `0x11` selector is shared by lid-open and
-ring-close; an already-open lid request is a no-op to avoid closing an open ring.
-There is no fabricated “flush succeeded” sensor.
+*Verified* means the command was sent to a real ZS800J and the result was confirmed by
+reading the device back, with every other setting unchanged. *Experimental* encodings
+follow the same frame layout but have not yet been exercised on hardware; they still
+read back and refuse to report success unless the device confirms it.
 
-## Write safety and connection lifecycle
+The ring and lid are linked on this model: opening the ring also opens the lid; closing
+the ring leaves the lid open. The automatic lid opening sensor reacts to a person
+standing in front of the toilet, so a lid you just closed may reopen if someone is there.
 
-Polling and actions share one lock and one short-lived connection. A command
-queries fresh **E2 and EA in the same session**, checks known mechanism positions
-and motion, and validates the complete supported E2 settings profile. Settings
-are preserved from the matching verified profile, not from stale HA state.
-The encoder changes only the action selector, or selector `0x19` plus auto-cover
-bit `0x08`. Every other parameter byte is preserved. Any other E2 bit change
-refuses the write rather than inventing a mapping.
+## Shower guard
 
-After writing, the session queries again and only publishes actual received
-state. Lid/ring actions require the target position with motion stopped;
-auto-cover requires the matching E2 bit. Small flush is sent once followed by
-status retrieval, **not** a physical completion ACK. Failed/unconfirmed writes
-mark entities unavailable, are not retried, and may still have reached hardware.
-Inspect the device before retrying. Connections are disconnected in `finally`,
-including cancellation. Uncertain disconnect blocks new connections until reload.
+Import the blueprint:
 
-BLE has no transaction ID here. Delayed notifications, notification ordering,
-mechanical safety interlocks and unreported settings need further exact-device
-acceptance. This code is not an occupancy-based safety system or a replacement
-for device protections. Occupancy is not exposed because its bit mapping was
-not independently established for this release.
+[![Open your Home Assistant instance and show the blueprint import dialog.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fxiaoyaner0201%2Fha-jomoo-ble%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fjomoo_ble%2Fshower_guard.yaml)
 
-## Hot-water automation goal — linkage pending / 联动待接入
+Inputs: a **hot-water-flowing** binary sensor, the toilet's *Automatic lid opening*
+switch and a restore delay (default 3 minutes). Hot water on → suspend; hot water off for
+the delay → resume. Each step retries up to 5 times, 30 s apart, until the
+`guard_active` attribute shows the target.
 
-The intended automation is:
+Use a signal that means hot water is actually flowing, not just that the heater is
+powered. Examples (adapt the entity ids):
 
-1. When the water heater is **actually delivering hot water**, save the current
-   automatic-cover setting and turn automatic cover off.
-2. When hot-water delivery stops, restore **the saved prior setting**, not always
-   “on”. If it was off before, it must remain off.
-
-**The water heater is not connected by this project. Linkage is pending.**
-Heater power, a hot tank, or a temperature threshold is not proof of hot-water
-flow. No heater entity, invented sensor, or ready-to-run household automation is
-included. A future linkage must validate a real flow/heating signal, deal with
-restarts and unavailable states, debounce flow, preserve manual overrides and
-avoid replaying a physical command after an uncertain failure.
-
-## Not supported / not claimed
-
-No washing, drying, large flush, temperature/pressure/nozzle setters, night-light
-setter, factory reset, activation, identity writes, firmware update/OTA, cloud
-login, or arbitrary command service is implemented. An observed status field
-does not imply its setter is safe. Other models (including unrelated `5A` or
-`FFA0` protocols) are not supported. Do not import raw vendor packages into this
-repository to extend it.
-
-## Local development and verification
-
-The pure protocol and synthetic-session tests need only Python's standard
-library. No HA server, radio, account or production configuration is used:
-
-```sh
-python -m unittest discover -s tests -v
-python scripts/sync_library.py --check
-python scripts/check_repository.py
-ruff check .
+```yaml
+template:
+  - binary_sensor:
+      # From a flow-rate sensor
+      - name: Hot water flowing
+        state: "{{ states('sensor.water_heater_flow') | float(0) > 0 }}"
+        delay_off: "00:00:20"
+      # Or from a heater entity that reports burner activity
+      - name: Hot water flowing (burner)
+        state: "{{ state_attr('water_heater.my_heater', 'heating') in [true, 1, '1'] }}"
+        delay_off: "00:00:20"
 ```
 
-`check_repository.py` runs `py_compile` on every Python source, parses JSON,
-checks local Markdown links and basic public-data hygiene. CI repeats the tests
-on Python 3.10, 3.13 and 3.14. `jomoo_ble` is the canonical library;
-`scripts/sync_library.py` produces the byte-identical copy bundled in the custom
-component. Change the canonical source first, then synchronize it.
+Guard semantics: suspend remembers the current value and only writes *off* if it was on;
+resume only writes *on* if it was on before, and never writes *off*. Changing the switch
+by hand while the guard is active cancels the guard, so your manual choice wins. The
+guard state survives restarts.
 
-Passing these checks proves only offline code/fixture behavior. A real Home
-Assistant config flow, Bluetooth proxy connection and exact-device regression
-remain acceptance gates for the deploying maintainer. See
-[CONTRIBUTING](CONTRIBUTING.md), [SECURITY](SECURITY.md) and [CHANGELOG](CHANGELOG.md).
+## Safety model
+
+- Before any write, the integration reads E2, FA, E9 and EA in the same connection and
+  refuses unless the toilet is in standby. Lid, ring and flush commands are also refused
+  while someone is seated or while the lid or ring is moving.
+- Every control frame carries the full settings block. It is rebuilt from that fresh
+  read, so nothing else changes. After the write, the integration reads back until the
+  target is confirmed. It then compares every other known setting and raises with a
+  before/after diff if anything else moved.
+- Flush commands report "sent, unconfirmed" (logged warning) if the flushing flag is not
+  seen within about 6 seconds.
+- Writes are **never retried automatically**: a failed write may still have reached the
+  toilet. No optimistic state is published.
+- If a disconnect cannot be confirmed, the integration stops connecting until reloaded.
+- Washing, drying, nozzle cleaning, firmware update and factory reset are not
+  implemented.
+
+This is not a safety system. Do not rely on it for occupancy detection or mechanical
+protection.
+
+## Limitations
+
+- Only the ZS800J protocol profile is implemented and only one unit has been tested.
+- There is no transaction id in the protocol. A very late notification could be mistaken
+  for a fresh answer.
+- Experimental controls are app-derived and unverified on hardware.
+
+## Development
+
+```sh
+python -m unittest discover -s tests -v   # protocol + synthetic BLE + shower guard
+python scripts/sync_library.py --check    # bundled lib/ identical to jomoo_ble/
+python scripts/check_repository.py        # compile, links, no real MAC / private IP
+ruff check . && ruff format --check .
+```
+
+`tests/ha_smoke/smoke_in_ha_container.py` runs the whole integration (config flow,
+entities, services, shower guard, options, diagnostics, unload) inside a real Home
+Assistant Python environment against a fake toilet. Never point it at a production
+config directory. Protocol details: [docs/protocol.md](docs/protocol.md). Verification
+record: [docs/verification.md](docs/verification.md).
+
+## Disclaimer
+
+Unofficial and not affiliated with or endorsed by JOMOO. JOMOO and Home Assistant are
+trademarks of their respective owners. The implementation is original. No vendor code,
+mini-program package or asset is included or needed. Use at your own risk.
+
+## License
+
+[Apache-2.0](LICENSE)

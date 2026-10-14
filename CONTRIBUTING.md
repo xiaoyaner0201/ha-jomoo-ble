@@ -25,6 +25,4 @@ one reversible setting, read back, restore the prior value, then check mechanica
 controls with a person present. Flush requires explicit approval. Do not test
 OTA, identity writes, activation or factory reset.
 
-No maintainer public identity/repository has been assigned yet. Publishing,
-maintainer metadata, release URLs, HACS registration and production deployment
-are separate decisions, not implied by a local passing test suite.
+Maintainer: @xiaoyaner0201. Issues and pull requests: https://github.com/xiaoyaner0201/ha-jomoo-ble
