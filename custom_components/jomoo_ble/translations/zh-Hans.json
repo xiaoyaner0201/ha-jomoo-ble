@@ -1,35 +1,221 @@
 {
-  "title": "九牧 BLE",
+  "title": "JOMOO BLE",
   "config": {
+    "flow_title": "{name}",
     "step": {
       "user": {
-        "title": "九牧 ZS800J BLE",
-        "description": "先关闭官方小程序。输入可连接 HA 蓝牙适配器/代理广播看到的 BLE MAC，不是 macOS CoreBluetooth UUID。设置时只读查询，动作默认禁用。",
+        "title": "九牧 ZS800J（蓝牙）",
+        "description": "请先关闭官方小程序：马桶同一时间只接受一个蓝牙连接。添加时会做一次只读状态查询（马桶会嘀一声）。控制功能默认关闭。",
         "data": {
-          "address": "BLE MAC 地址",
+          "address": "蓝牙 MAC 地址",
           "name_prefix": "广播名称前缀"
         }
+      },
+      "bluetooth_confirm": {
+        "title": "九牧 ZS800J（蓝牙）",
+        "description": "要添加 {name} 吗？请先关闭官方小程序。添加时会做一次只读状态查询（马桶会嘀一声）。"
       }
     },
     "error": {
-      "invalid_address": "请输入六组冒号分隔的两位十六进制数。",
-      "invalid_prefix": "必须输入广播前缀。",
-      "cannot_connect": "无法取得新鲜 E2/EA 状态，请检查型号、代理位置和 BLE 单连接限制。"
+      "invalid_address": "请输入用冒号分隔的六组两位十六进制数。",
+      "invalid_prefix": "名称前缀不能为空。",
+      "cannot_connect": "没有读到最新状态。请检查蓝牙代理的位置，并确认没有其他 App 正连着马桶。"
     },
     "abort": {
-      "already_configured": "该设备已经配置。"
+      "already_configured": "这台马桶已经添加过了。",
+      "not_supported": "不支持这个型号。"
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "轮询与动作",
-        "description": "先核对精确型号和只读状态，再允许控制。翻盖/座圈会运动，小冲会用水。未映射设置仍拒绝写入。连接可能鸣叫，轮询与官方小程序共享唯一 BLE 连接。",
+        "title": "控制与刷新",
+        "description": "马桶每次被连接都会嘀一声，并让官方 App 几秒内连不上，所以默认不自动刷新（0）。",
         "data": {
-          "enable_controls": "启用已验证的机械动作",
-          "poll_interval": "轮询间隔（秒，30–3600）"
+          "enable_controls": "启用已验证的控制（翻盖、翻圈、小冲、自动翻盖、淋浴守护）",
+          "enable_experimental": "启用实验性控制（尚未在真机上验证）",
+          "poll_interval": "自动刷新间隔（秒，0 为关闭，其他取 300–86400）"
         }
       }
+    },
+    "error": {
+      "invalid_interval": "请填 0，或 300 到 86400 之间的数。"
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "lid_open": {
+        "name": "上盖"
+      },
+      "ring_open": {
+        "name": "座圈"
+      },
+      "lid_moving": {
+        "name": "上盖运动中"
+      },
+      "ring_moving": {
+        "name": "座圈运动中"
+      },
+      "seated": {
+        "name": "有人就座"
+      },
+      "flushing": {
+        "name": "冲水中"
+      },
+      "water_shortage": {
+        "name": "缺水"
+      },
+      "flow_abnormal": {
+        "name": "水流异常"
+      },
+      "sensor_fault": {
+        "name": "传感器或过温故障"
+      },
+      "filter_low": {
+        "name": "滤芯需更换"
+      },
+      "foam_low": {
+        "name": "泡沫液不足"
+      },
+      "guard_active": {
+        "name": "淋浴守护生效中"
+      }
+    },
+    "button": {
+      "refresh": {
+        "name": "刷新状态"
+      },
+      "open_lid": {
+        "name": "开盖"
+      },
+      "close_lid": {
+        "name": "关盖"
+      },
+      "open_ring": {
+        "name": "开座圈"
+      },
+      "close_ring": {
+        "name": "关座圈"
+      },
+      "small_flush": {
+        "name": "小冲"
+      },
+      "large_flush": {
+        "name": "大冲（实验）"
+      }
+    },
+    "number": {
+      "water_temperature": {
+        "name": "水温档位"
+      },
+      "seat_temperature": {
+        "name": "座温档位"
+      },
+      "air_temperature": {
+        "name": "暖风温度档位"
+      },
+      "hip_pressure": {
+        "name": "臀洗水压"
+      },
+      "hip_nozzle": {
+        "name": "臀洗喷嘴位置"
+      },
+      "wind_speed": {
+        "name": "暖风风速"
+      },
+      "wide_wash_level": {
+        "name": "宽幅洗档位"
+      }
+    },
+    "sensor": {
+      "filter_remaining": {
+        "name": "滤芯剩余"
+      },
+      "filter_used": {
+        "name": "滤芯已用"
+      },
+      "work_status": {
+        "name": "工作状态",
+        "state": {
+          "standby": "待机",
+          "nozzle_cleaning": "喷嘴清洁",
+          "nozzle_replacement": "更换喷嘴",
+          "drying": "烘干",
+          "hip_wash": "臀洗",
+          "lady_wash": "妇洗",
+          "other": "其他"
+        }
+      },
+      "lady_pressure": {
+        "name": "妇洗水压"
+      },
+      "lady_nozzle": {
+        "name": "妇洗喷嘴位置"
+      },
+      "last_refresh": {
+        "name": "上次刷新"
+      },
+      "raw_e2": {
+        "name": "原始 E2"
+      },
+      "raw_fa": {
+        "name": "原始 FA"
+      },
+      "raw_e9": {
+        "name": "原始 E9"
+      },
+      "raw_ea": {
+        "name": "原始 EA"
+      },
+      "raw_e7": {
+        "name": "原始 E7"
+      }
+    },
+    "switch": {
+      "auto_cover": {
+        "name": "自动翻盖"
+      },
+      "auto_flush": {
+        "name": "自动冲水（实验）"
+      },
+      "auto_night_light": {
+        "name": "自动夜灯（实验）"
+      },
+      "uv_disinfection": {
+        "name": "UV 水路杀菌（实验）"
+      },
+      "close_lid_before_flush": {
+        "name": "关盖冲水（实验）"
+      },
+      "auto_small_flush": {
+        "name": "自动小冲（实验）"
+      },
+      "foot_sensor": {
+        "name": "脚感（实验）"
+      },
+      "ambient_light": {
+        "name": "氛围灯（实验）"
+      }
+    }
+  },
+  "services": {
+    "refresh": {
+      "name": "刷新状态",
+      "description": "短暂连接、读取全部状态后断开。马桶会嘀一声。",
+      "fields": {
+        "device_id": {
+          "name": "马桶",
+          "description": "要刷新的马桶。"
+        }
+      }
+    },
+    "suspend_auto_cover": {
+      "name": "暂停自动翻盖",
+      "description": "淋浴守护：记住当前的自动翻盖设置，然后关闭它。"
+    },
+    "resume_auto_cover": {
+      "name": "恢复自动翻盖",
+      "description": "淋浴守护：恢复上次暂停时记住的设置（原来是关的就不会打开）。"
     }
   }
 }

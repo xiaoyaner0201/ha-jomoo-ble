@@ -1,51 +1,95 @@
-"""Observed lid/ring positions and motion; unknown position is not closed."""
+"""Lid/ring position and motion, occupancy, flushing, faults and shower-guard state."""
 
-from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
+from __future__ import annotations
+
+from typing import Any, Callable
+
+from homeassistant.components.binary_sensor import (
+    BinarySensorDeviceClass,
+    BinarySensorEntity,
+)
 from homeassistant.helpers.entity import EntityCategory
 
 from .entity import JomooEntity
+from .lib.protocol import FoamLevel
 
-MECHANISM = {
-    "lid_open": "Lid open",
-    "ring_open": "Seat ring open",
-    "lid_moving": "Lid moving",
-    "ring_moving": "Seat ring moving",
+
+def _get(record: str, name: str) -> Callable[[Any], Any]:
+    def get(snapshot):
+        value = getattr(snapshot, record)
+        return None if value is None else getattr(value, name)
+
+    return get
+
+
+def _foam_low(snapshot):
+    extended = snapshot.extended
+    if extended is None or extended.foam_level is FoamLevel.UNKNOWN:
+        return None
+    return extended.foam_level is FoamLevel.LOW
+
+
+# key -> (getter, device class, entity category)
+SENSORS = {
+    "lid_open": (_get("mechanism", "lid_open"), BinarySensorDeviceClass.OPENING, None),
+    "ring_open": (_get("mechanism", "ring_open"), BinarySensorDeviceClass.OPENING, None),
+    "lid_moving": (_get("mechanism", "lid_moving"), BinarySensorDeviceClass.MOVING, None),
+    "ring_moving": (_get("mechanism", "ring_moving"), BinarySensorDeviceClass.MOVING, None),
+    "seated": (_get("runtime", "seated"), BinarySensorDeviceClass.OCCUPANCY, None),
+    "flushing": (_get("extended", "flushing"), BinarySensorDeviceClass.RUNNING, None),
+    "water_shortage": (
+        _get("runtime", "water_shortage"),
+        BinarySensorDeviceClass.PROBLEM,
+        EntityCategory.DIAGNOSTIC,
+    ),
+    "flow_abnormal": (
+        _get("runtime", "flow_abnormal"),
+        BinarySensorDeviceClass.PROBLEM,
+        EntityCategory.DIAGNOSTIC,
+    ),
+    "sensor_fault": (
+        _get("runtime", "fault"),
+        BinarySensorDeviceClass.PROBLEM,
+        EntityCategory.DIAGNOSTIC,
+    ),
+    "filter_low": (
+        _get("extended", "filter_insufficient"),
+        BinarySensorDeviceClass.PROBLEM,
+        None,
+    ),
+    "foam_low": (_foam_low, BinarySensorDeviceClass.PROBLEM, None),
 }
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    co = entry.runtime_data
-    async_add_entities(
-        [MechanismSensor(co, k, n) for k, n in MECHANISM.items()]
-        + [
-            AutoFlushSensor(co, "auto_flush", "Automatic flush setting"),
-            SafeProfileSensor(co, "safe_parameters", "Verified parameter profile"),
-        ]
-    )
+    coordinator = entry.runtime_data
+    entities: list[BinarySensorEntity] = [
+        StatusBinarySensor(coordinator, key, *spec) for key, spec in SENSORS.items()
+    ]
+    entities.append(GuardBinarySensor(coordinator, "guard_active"))
+    async_add_entities(entities)
 
 
-class MechanismSensor(JomooEntity, BinarySensorEntity):
-    def __init__(self, coordinator, key, name):
-        super().__init__(coordinator, key, name)
-        self.key = key
-        if key.endswith("open"):
-            self._attr_device_class = BinarySensorDeviceClass.OPENING
+class StatusBinarySensor(JomooEntity, BinarySensorEntity):
+    def __init__(self, coordinator, key, getter, device_class, category) -> None:
+        super().__init__(coordinator, key)
+        self.getter = getter
+        self._attr_device_class = device_class
+        self._attr_entity_category = category
 
     @property
-    def is_on(self):
-        state = self.mechanism_values()
-        return getattr(state, self.key) if state else None
+    def is_on(self) -> bool | None:
+        return None if self.snapshot is None else self.getter(self.snapshot)
 
 
-class AutoFlushSensor(JomooEntity, BinarySensorEntity):
-    @property
-    def is_on(self):
-        return self.setting_values().get("auto_flush")
-
-
-class SafeProfileSensor(JomooEntity, BinarySensorEntity):
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
+class GuardBinarySensor(JomooEntity, BinarySensorEntity):
+    _attr_icon = "mdi:shower-head"
 
     @property
-    def is_on(self):
-        return bool(self.setting_values())
+    def available(self) -> bool:
+        return True
+
+    @property
+    def is_on(self) -> bool:
+        state = self.coordinator.guard_state
+        return state.active or state.pending

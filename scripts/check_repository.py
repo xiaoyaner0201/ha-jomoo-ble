@@ -43,6 +43,12 @@ def main():
             )
             if any(a.upper() != "02:00:00:00:00:01" for a in addresses):
                 raise SystemExit(f"Non-fictional MAC in {path.relative_to(ROOT)}")
+            private_ip = re.search(
+                r"(?<![\d.])(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}(?![\d.])",
+                text,
+            )
+            if private_ip:
+                raise SystemExit(f"Private IPv4 address in {path.relative_to(ROOT)}")
     manifest = json.loads((ROOT / "custom_components/jomoo_ble/manifest.json").read_text())
     if manifest["domain"] != "jomoo_ble" or not manifest["config_flow"]:
         raise SystemExit("Invalid component metadata")

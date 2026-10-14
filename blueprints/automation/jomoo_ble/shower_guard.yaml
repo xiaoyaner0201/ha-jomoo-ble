@@ -1,0 +1,96 @@
+blueprint:
+  name: JOMOO shower guard
+  description: >-
+    While the water heater is delivering hot water, turn the toilet's automatic lid
+    opening off; when hot water stops for a while, restore whatever it was before.
+    Requires "Enable verified controls" in the JOMOO BLE integration options.
+  domain: automation
+  source_url: https://github.com/xiaoyaner0201/ha-jomoo-ble/blob/main/blueprints/automation/jomoo_ble/shower_guard.yaml
+  input:
+    hot_water:
+      name: Hot water flowing
+      description: >-
+        A binary sensor that is on only while hot water is actually flowing (not merely
+        while the heater is powered). See the README for template examples.
+      selector:
+        entity:
+          domain: binary_sensor
+    toilet:
+      name: Toilet automatic lid opening switch
+      selector:
+        entity:
+          domain: switch
+          integration: jomoo_ble
+    off_delay:
+      name: Restore delay
+      description: How long hot water must stay off before automatic lid opening is restored.
+      default:
+        minutes: 3
+      selector:
+        duration: {}
+
+mode: queued
+max: 10
+
+trigger:
+  - platform: state
+    entity_id: !input hot_water
+    to: "on"
+    id: start
+  - platform: state
+    entity_id: !input hot_water
+    to: "off"
+    for: !input off_delay
+    id: stop
+
+variables:
+  toilet: !input toilet
+  hot_water: !input hot_water
+
+action:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: start
+        sequence:
+          - repeat:
+              sequence:
+                - service: jomoo_ble.suspend_auto_cover
+                  target:
+                    entity_id: !input toilet
+                  continue_on_error: true
+                - if:
+                    - condition: template
+                      value_template: "{{ not state_attr(toilet, 'guard_active') }}"
+                  then:
+                    - delay:
+                        seconds: 30
+              until:
+                - condition: template
+                  value_template: >-
+                    {{ state_attr(toilet, 'guard_active') or repeat.index >= 5
+                       or is_state(hot_water, 'off') }}
+      - conditions:
+          - condition: trigger
+            id: stop
+        sequence:
+          - repeat:
+              sequence:
+                - service: jomoo_ble.resume_auto_cover
+                  target:
+                    entity_id: !input toilet
+                  continue_on_error: true
+                - if:
+                    - condition: template
+                      value_template: >-
+                        {{ state_attr(toilet, 'guard_active')
+                           or state_attr(toilet, 'guard_pending') }}
+                  then:
+                    - delay:
+                        seconds: 30
+              until:
+                - condition: template
+                  value_template: >-
+                    {{ not (state_attr(toilet, 'guard_active')
+                            or state_attr(toilet, 'guard_pending'))
+                       or repeat.index >= 5 or is_state(hot_water, 'on') }}

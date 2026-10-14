@@ -1,63 +1,117 @@
-"""Ordinal settings plus unmapped/raw diagnostics; no invented temperature units."""
+"""Read-only sensors decoded from the latest on-demand status read."""
 
-from homeassistant.components.sensor import SensorEntity
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Callable
+
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
+from homeassistant.const import PERCENTAGE, UnitOfTime
 from homeassistant.helpers.entity import EntityCategory
 
 from .entity import JomooEntity
-from .lib.protocol import EXTENDED, FILTER, STATE, WORK
+from .lib.protocol import EXTENDED, FILTER, LID_RING, STATE, WORK, WorkStatus
 
-SETTINGS = {
-    "water_temperature_level": "Water temperature level",
-    "seat_temperature_level": "Seat temperature level",
-    "air_temperature_level": "Air temperature level",
-    "hip_water_pressure": "Hip water pressure level",
-    "hip_nozzle_position": "Hip nozzle position",
-    "woman_water_pressure": "Woman water pressure level",
-    "woman_nozzle_position": "Woman nozzle position",
+
+@dataclass(frozen=True)
+class Spec:
+    value: Callable[[Any], Any]
+    unit: str | None = None
+    device_class: SensorDeviceClass | None = None
+    state_class: SensorStateClass | None = None
+    category: EntityCategory | None = None
+    icon: str | None = None
+    options: list[str] | None = None
+
+
+def _field(record: str, name: str):
+    def get(snapshot):
+        value = getattr(snapshot, record)
+        return None if value is None else getattr(value, name)
+
+    return get
+
+
+SENSORS: dict[str, Spec] = {
+    "filter_remaining": Spec(
+        lambda s: s.filter.remaining_percent if s.filter else None,
+        PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:air-filter",
+    ),
+    "filter_used": Spec(
+        lambda s: s.filter.used_hours if s.filter else None,
+        UnitOfTime.HOURS,
+        SensorDeviceClass.DURATION,
+        SensorStateClass.TOTAL_INCREASING,
+        EntityCategory.DIAGNOSTIC,
+    ),
+    "work_status": Spec(
+        lambda s: s.runtime.status.value if s.runtime else None,
+        device_class=SensorDeviceClass.ENUM,
+        options=[status.value for status in WorkStatus],
+        icon="mdi:state-machine",
+    ),
+    "lady_pressure": Spec(_field("settings", "lady_pressure"), icon="mdi:gauge"),
+    "lady_nozzle": Spec(_field("settings", "lady_nozzle"), icon="mdi:arrow-left-right"),
 }
 RAW = {
-    STATE: "E2 raw status",
-    FILTER: "Filter raw status",
-    EXTENDED: "FA raw status",
-    WORK: "E9 raw status",
+    "raw_e2": STATE,
+    "raw_fa": EXTENDED,
+    "raw_e9": WORK,
+    "raw_ea": LID_RING,
+    "raw_e7": FILTER,
 }
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
     coordinator = entry.runtime_data
-    async_add_entities(
-        [SettingSensor(coordinator, k, n) for k, n in SETTINGS.items()]
-        + [RawSensor(coordinator, k, n) for k, n in RAW.items()]
-        + [WorkSensor(coordinator, "work_status", "Work status code")]
-    )
+    entities: list[SensorEntity] = [SpecSensor(coordinator, k, v) for k, v in SENSORS.items()]
+    entities.append(LastRefreshSensor(coordinator, "last_refresh"))
+    entities += [RawSensor(coordinator, key, command) for key, command in RAW.items()]
+    async_add_entities(entities)
 
 
-class SettingSensor(JomooEntity, SensorEntity):
-    def __init__(self, coordinator, key, name):
-        super().__init__(coordinator, key, name)
-        self.key = key
+class SpecSensor(JomooEntity, SensorEntity):
+    def __init__(self, coordinator, key: str, spec: Spec) -> None:
+        super().__init__(coordinator, key)
+        self.spec = spec
+        self._attr_native_unit_of_measurement = spec.unit
+        self._attr_device_class = spec.device_class
+        self._attr_state_class = spec.state_class
+        self._attr_entity_category = spec.category
+        self._attr_icon = spec.icon
+        self._attr_options = spec.options
 
     @property
     def native_value(self):
-        return self.setting_values().get(self.key)
+        return None if self.snapshot is None else self.spec.value(self.snapshot)
+
+
+class LastRefreshSensor(JomooEntity, SensorEntity):
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def native_value(self):
+        return self.coordinator.last_refresh
 
 
 class RawSensor(JomooEntity, SensorEntity):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_entity_registry_enabled_default = False
 
-    def __init__(self, coordinator, command, name):
-        super().__init__(coordinator, f"raw_{command:02x}", name)
+    def __init__(self, coordinator, key: str, command: int) -> None:
+        super().__init__(coordinator, key)
         self.command = command
 
     @property
     def native_value(self):
-        frame = self.frame(self.command)
-        return frame.payload.hex() if frame else None
-
-
-class WorkSensor(JomooEntity, SensorEntity):
-    @property
-    def native_value(self):
-        frame = self.frame(WORK)
-        return frame.payload[3] if frame else None
+        if self.snapshot is None:
+            return None
+        frame = self.snapshot.frames.get(self.command)
+        return None if frame is None else frame.payload.hex()

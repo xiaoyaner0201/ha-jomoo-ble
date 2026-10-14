@@ -1,35 +1,221 @@
 {
   "title": "JOMOO BLE",
   "config": {
+    "flow_title": "{name}",
     "step": {
       "user": {
-        "title": "JOMOO ZS800J BLE",
-        "description": "Close the official mini program. Enter the BLE MAC advertised via a connectable Home Assistant adapter/proxy, not a macOS CoreBluetooth UUID. Setup performs read-only status queries; controls start disabled.",
+        "title": "JOMOO ZS800J (Bluetooth)",
+        "description": "Close the official mini program first: the toilet accepts only one Bluetooth connection. Setup performs one read-only status query (the toilet will beep once). Controls start disabled.",
         "data": {
-          "address": "BLE MAC address",
+          "address": "Bluetooth MAC address",
           "name_prefix": "Advertised name prefix"
         }
+      },
+      "bluetooth_confirm": {
+        "title": "JOMOO ZS800J (Bluetooth)",
+        "description": "Set up {name}? Close the official mini program first. Setup performs one read-only status query (the toilet will beep once)."
       }
     },
     "error": {
       "invalid_address": "Enter six two-digit hexadecimal groups separated by colons.",
       "invalid_prefix": "A name prefix is required.",
-      "cannot_connect": "Unable to obtain fresh E2/EA status. Check model, proxy placement and the single-central constraint."
+      "cannot_connect": "No fresh status received. Check the Bluetooth proxy placement and that no other app is connected."
     },
     "abort": {
-      "already_configured": "This device is already configured."
+      "already_configured": "This toilet is already configured.",
+      "not_supported": "This model is not supported."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Polling and controls",
-        "description": "Enable controls only after checking read-only status on your exact model. Lid/ring commands move hardware and small flush uses water. Unmapped settings still block all writes. Connections can beep; polling shares the single BLE slot with the official app.",
+        "title": "Controls and refresh",
+        "description": "Every connection makes the toilet beep and blocks the official app for a few seconds, so automatic polling is off by default (0).",
         "data": {
-          "enable_controls": "Enable verified mechanical controls",
-          "poll_interval": "Polling interval (seconds, 30–3600)"
+          "enable_controls": "Enable verified controls (lid, seat ring, small flush, automatic lid opening, shower guard)",
+          "enable_experimental": "Enable experimental controls (not yet verified on hardware)",
+          "poll_interval": "Automatic refresh interval in seconds (0 = off, otherwise 300–86400)"
         }
       }
+    },
+    "error": {
+      "invalid_interval": "Use 0 or a value between 300 and 86400."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "lid_open": {
+        "name": "Lid"
+      },
+      "ring_open": {
+        "name": "Seat ring"
+      },
+      "lid_moving": {
+        "name": "Lid moving"
+      },
+      "ring_moving": {
+        "name": "Seat ring moving"
+      },
+      "seated": {
+        "name": "Seated"
+      },
+      "flushing": {
+        "name": "Flushing"
+      },
+      "water_shortage": {
+        "name": "Water shortage"
+      },
+      "flow_abnormal": {
+        "name": "Abnormal water flow"
+      },
+      "sensor_fault": {
+        "name": "Sensor or overheat fault"
+      },
+      "filter_low": {
+        "name": "Filter needs replacement"
+      },
+      "foam_low": {
+        "name": "Foam liquid low"
+      },
+      "guard_active": {
+        "name": "Shower guard active"
+      }
+    },
+    "button": {
+      "refresh": {
+        "name": "Refresh status"
+      },
+      "open_lid": {
+        "name": "Open lid"
+      },
+      "close_lid": {
+        "name": "Close lid"
+      },
+      "open_ring": {
+        "name": "Open seat ring"
+      },
+      "close_ring": {
+        "name": "Close seat ring"
+      },
+      "small_flush": {
+        "name": "Small flush"
+      },
+      "large_flush": {
+        "name": "Large flush (experimental)"
+      }
+    },
+    "number": {
+      "water_temperature": {
+        "name": "Water temperature level"
+      },
+      "seat_temperature": {
+        "name": "Seat temperature level"
+      },
+      "air_temperature": {
+        "name": "Dryer temperature level"
+      },
+      "hip_pressure": {
+        "name": "Rear wash pressure"
+      },
+      "hip_nozzle": {
+        "name": "Rear wash nozzle position"
+      },
+      "wind_speed": {
+        "name": "Dryer fan speed"
+      },
+      "wide_wash_level": {
+        "name": "Wide wash level"
+      }
+    },
+    "sensor": {
+      "filter_remaining": {
+        "name": "Filter remaining"
+      },
+      "filter_used": {
+        "name": "Filter used"
+      },
+      "work_status": {
+        "name": "Status",
+        "state": {
+          "standby": "Standby",
+          "nozzle_cleaning": "Nozzle cleaning",
+          "nozzle_replacement": "Nozzle replacement",
+          "drying": "Drying",
+          "hip_wash": "Rear wash",
+          "lady_wash": "Front wash",
+          "other": "Other"
+        }
+      },
+      "lady_pressure": {
+        "name": "Front wash pressure"
+      },
+      "lady_nozzle": {
+        "name": "Front wash nozzle position"
+      },
+      "last_refresh": {
+        "name": "Last refresh"
+      },
+      "raw_e2": {
+        "name": "Raw E2"
+      },
+      "raw_fa": {
+        "name": "Raw FA"
+      },
+      "raw_e9": {
+        "name": "Raw E9"
+      },
+      "raw_ea": {
+        "name": "Raw EA"
+      },
+      "raw_e7": {
+        "name": "Raw E7"
+      }
+    },
+    "switch": {
+      "auto_cover": {
+        "name": "Automatic lid opening"
+      },
+      "auto_flush": {
+        "name": "Automatic flush (experimental)"
+      },
+      "auto_night_light": {
+        "name": "Automatic night light (experimental)"
+      },
+      "uv_disinfection": {
+        "name": "UV water disinfection (experimental)"
+      },
+      "close_lid_before_flush": {
+        "name": "Close lid before flush (experimental)"
+      },
+      "auto_small_flush": {
+        "name": "Automatic small flush (experimental)"
+      },
+      "foot_sensor": {
+        "name": "Foot sensor (experimental)"
+      },
+      "ambient_light": {
+        "name": "Ambient light (experimental)"
+      }
+    }
+  },
+  "services": {
+    "refresh": {
+      "name": "Refresh status",
+      "description": "Connect briefly, read the full status and disconnect. The toilet beeps once.",
+      "fields": {
+        "device_id": {
+          "name": "Toilet",
+          "description": "The toilet to refresh."
+        }
+      }
+    },
+    "suspend_auto_cover": {
+      "name": "Suspend automatic lid opening",
+      "description": "Shower guard: remember the current automatic lid opening setting and turn it off."
+    },
+    "resume_auto_cover": {
+      "name": "Resume automatic lid opening",
+      "description": "Shower guard: restore the setting remembered by the last suspend (never turns it on if it was off)."
     }
   }
 }
