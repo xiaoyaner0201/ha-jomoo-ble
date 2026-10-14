@@ -53,5 +53,17 @@ Verified with read-back and with all other settings unchanged:
 - small flush (also heard by the owner);
 - automatic lid opening off and on.
 
+## Production Home Assistant (HA 2026.9.1, same toilet and proxy)
+
+- Bluetooth discovery found the toilet; the confirm step's one read-only check succeeded.
+- `Refresh status` returned standby, lid and ring closed, automatic lid opening on,
+  filter 91.6 %.
+- With controls enabled, `jomoo_ble.suspend_auto_cover` was run once via the HA service API.
+  The first attempt wrote the off frame but never saw the E2 reply to the re-check, so
+  the guard stayed *pending* while still remembering "was on". The client now re-sends
+  the read-only query every 2 s within the timeout (actions are still never retried).
+  After that fix the retried suspend confirmed off, and `resume_auto_cover` restored on
+  and cleared the guard.
+
 Not yet exercised on hardware: the experimental switches and numbers, large flush, and
 the shower guard driven by a real water-heater signal.
