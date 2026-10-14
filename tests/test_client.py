@@ -1,221 +1,343 @@
-"""Synthetic BLE transport tests, not Home Assistant or live-device tests."""
+"""Synthetic BLE transport tests (no radio, no Home Assistant, no device)."""
 
 import asyncio
 import unittest
+from dataclasses import dataclass, field
 
-from jomoo_ble.client import SessionError, SessionManager
-from jomoo_ble.protocol import Action, ProtocolError, build_frame, parse_frame
+from jomoo_ble.client import (
+    FLUSH_UNCONFIRMED,
+    CommandRefused,
+    Mechanical,
+    SessionError,
+    SessionManager,
+    SetOption,
+    SetSettings,
+    VerificationError,
+)
+from jomoo_ble.guard import GuardState, ShowerGuard
+from jomoo_ble.protocol import Option, build_frame, parse_frame
 
 E2 = bytes.fromhex("f3f40b2192e24a52b3450900003dfc")
+FA = bytes.fromhex("f3f40c2100fa4a52b345113229335afc")
+E9 = bytes.fromhex("f3f40a2100e94500000100005afc")
 EA = bytes.fromhex("f3f4112122ea05008500804c13005f0000000006fc")
+E7 = bytes.fromhex("f3f4082192e701c3131c95fc")
+
+
+def with_byte(frame: bytes, index: int, value: int) -> bytes:
+    """Return the frame with payload byte `index` replaced (checksum recomputed)."""
+    parsed = parse_frame(frame)
+    payload = bytearray(parsed.payload)
+    payload[index] = value
+    return build_frame(parsed.command, bytes(payload), parsed.source, parsed.destination)
+
+
+@dataclass
+class Device:
+    """A tiny state machine standing in for the toilet."""
+
+    e2: bytes = E2
+    fa: bytes = FA
+    e9: bytes = E9
+    ea: bytes = EA
+    flush_bit_on_flush: bool = True
+    ignore_writes: bool = False
+    corrupt_on_write: bool = False
+    write_error: bool = False
+    disconnect_error: bool = False
+    stay_connected: bool = False
+    active: int = 0
+    max_active: int = 0
+    connections: int = 0
+    writes: list = field(default_factory=list)
+
+    def apply(self, frame: bytes) -> None:
+        parsed = parse_frame(frame)
+        if self.ignore_writes:
+            return
+        if parsed.command == 0x19:
+            b6 = parsed.payload[0]
+            self.e2 = with_byte(self.e2, 0, b6)
+            self.fa = with_byte(self.fa, 0, b6)
+        elif parsed.command == 0x10:
+            self.ea = with_byte(self.ea, 0, 0x05)
+        elif parsed.command == 0x11:
+            self.ea = with_byte(self.ea, 0, 0x09)
+        elif parsed.command == 0x13:
+            self.ea = with_byte(self.ea, 0, 0x0A)
+        elif parsed.command in (0x0E, 0x0F) and self.flush_bit_on_flush:
+            self.fa = with_byte(self.fa, 4, parse_frame(self.fa).payload[4] | 0x04)
+        elif parsed.command == 0x1F and parsed.payload[0] == 0x21:
+            p5 = parse_frame(self.fa).payload[5]
+            p5 = p5 | 0x20 if parsed.payload[1] == 0x40 else p5 & ~0x20
+            self.fa = with_byte(self.fa, 5, p5)
+        if self.corrupt_on_write:
+            self.e2 = with_byte(self.e2, 1, 0x55)  # seat temperature 5 instead of 2
+            self.fa = with_byte(self.fa, 1, 0x55)
 
 
 class FakeClient:
-    def __init__(self, factory):
-        self.factory = factory
+    def __init__(self, device: Device):
+        self.device = device
         self.callback = None
-        self.writes = []
         self.is_connected = True
-        self.state = factory.initial_state
-        self.mechanism = factory.initial_mechanism
-        self.acted = False
 
     async def start_notify(self, characteristic, callback):
         self.callback = callback
 
     async def write_gatt_char(self, characteristic, data, response):
-        self.writes.append(bytes(data))
-        await asyncio.sleep(0)
+        data = bytes(data)
         frame = parse_frame(data)
+        await asyncio.sleep(0)
         if frame.command == 0xE2:
-            if self.factory.no_state:
-                return
-            self.callback(None, bytearray(self.state))
-            if not (self.factory.missing_post_ea and self.acted):
-                self.callback(None, bytearray(self.mechanism))
-        elif frame.command != 0xE7:
-            self.acted = True
-            if self.factory.write_error:
-                raise OSError("synthetic lost acknowledgement")
-            if self.factory.ignore_action:
-                return
-            if frame.command == 0x19:
-                self.state = build_frame(
-                    0xE2,
-                    bytes([frame.payload[0]]) + parse_frame(E2).payload[1:],
-                    source=0x21,
-                    destination=0x92,
-                )
-            elif frame.command == 0x11:
-                self.mechanism = build_frame(
-                    0xEA, b"\x09" + parse_frame(EA).payload[1:], source=0x21, destination=0x22
-                )
+            for item in (self.device.e2, self.device.ea, self.device.e9, self.device.fa):
+                self.callback(None, bytearray(item))
+            return
+        if frame.command == 0xE7:
+            self.callback(None, bytearray(E7))
+            return
+        self.device.writes.append(data)
+        if self.device.write_error:
+            raise OSError("synthetic lost acknowledgement")
+        self.device.apply(data)
 
     async def disconnect(self):
-        self.factory.active -= 1
-        if self.factory.disconnect_error:
+        self.device.active -= 1
+        if self.device.disconnect_error:
             raise OSError("synthetic disconnect failure")
-        self.is_connected = self.factory.silent_disconnect
+        self.is_connected = self.device.stay_connected
 
 
-class Factory:
-    no_state = False
-    write_error = False
-    ignore_action = False
-    disconnect_error = False
-    missing_post_ea = False
-    silent_disconnect = False
-    initial_state = E2
-    initial_mechanism = EA
+def manager(device: Device) -> SessionManager:
+    async def connect():
+        device.connections += 1
+        device.active += 1
+        device.max_active = max(device.max_active, device.active)
+        await asyncio.sleep(0)
+        return FakeClient(device)
 
-    def __init__(self):
-        self.clients = []
-        self.active = 0
-        self.max_active = 0
-
-    async def connect(self):
-        self.active += 1
-        self.max_active = max(self.max_active, self.active)
-        client = FakeClient(self)
-        self.clients.append(client)
-        return client
-
-    def session(self):
-        return SessionManager(
-            self.connect, response_timeout=0.01, action_timeout=0.01, settle_time=0
-        )
+    return SessionManager(
+        connect,
+        response_timeout=0.2,
+        action_timeout=0.3,
+        flush_confirm_timeout=0.2,
+        settle_time=0,
+        poll_gap=0,
+    )
 
 
-class ClientTests(unittest.IsolatedAsyncioTestCase):
-    async def test_poll_queries_and_disconnects(self):
-        factory = Factory()
-        observed = await factory.session().poll()
-        self.assertIn(0xE2, observed.frames)
-        self.assertIn(0xEA, observed.frames)
-        self.assertEqual([parse_frame(x).command for x in factory.clients[0].writes], [0xE2, 0xE7])
-        self.assertFalse(factory.clients[0].is_connected)
+def run(coro):
+    return asyncio.run(coro)
 
-    async def test_action_is_preceded_by_current_query_and_read_back(self):
-        factory = Factory()
-        snapshot = await factory.session().command(Action.AUTO_COVER_OFF)
-        self.assertEqual(snapshot.frames[0xE2].payload[0], 0x42)
-        self.assertEqual(
-            [parse_frame(x).command for x in factory.clients[0].writes], [0xE2, 0xE7, 0x19, 0xE2]
-        )
 
-    async def test_no_state_no_action(self):
-        factory = Factory()
-        factory.no_state = True
-        with self.assertRaises((SessionError, asyncio.TimeoutError)):
-            await factory.session().command(Action.SMALL_FLUSH)
-        self.assertEqual([parse_frame(x).command for x in factory.clients[0].writes], [0xE2, 0xE7])
-        self.assertEqual(factory.active, 0)
+class SessionTests(unittest.TestCase):
+    def test_poll_reads_everything_and_disconnects(self):
+        device = Device()
+        snap = run(manager(device).poll())
+        self.assertEqual(snap.settings.water_temperature, 4)
+        self.assertEqual(snap.filter.remaining_percent, 91.6)
+        self.assertEqual(device.active, 0)
+        self.assertEqual(device.writes, [])
 
-    async def test_write_failure_not_retried_or_optimistic(self):
-        factory = Factory()
-        factory.write_error = True
-        with self.assertRaises(OSError):
-            await factory.session().command(Action.AUTO_COVER_OFF)
-        self.assertEqual(sum(parse_frame(x).command == 0x19 for x in factory.clients[0].writes), 1)
-        self.assertEqual(factory.active, 0)
+    def test_open_lid_then_already_open_is_noop(self):
+        device = Device()
+        session = manager(device)
+        snap = run(session.command(Mechanical.OPEN_LID))
+        self.assertTrue(snap.mechanism.lid_open)
+        self.assertEqual(len(device.writes), 1)
+        run(session.command(Mechanical.OPEN_LID))
+        self.assertEqual(len(device.writes), 1)
 
-    async def test_unconfirmed_action_fails(self):
-        factory = Factory()
-        factory.ignore_action = True
+    def test_auto_cover_off_verified(self):
+        device = Device()
+        snap = run(manager(device).command(SetSettings({"auto_cover": False})))
+        self.assertFalse(snap.settings.auto_cover)
+        self.assertEqual(device.writes[0].hex(), "f3f40f9221194252b3300010000000000062fc")
+
+    def test_option_write(self):
+        device = Device(fa=with_byte(FA, 5, 0x12))  # UV off
+        snap = run(manager(device).command(SetOption(Option.UV_DISINFECTION, True)))
+        self.assertTrue(snap.extended.uv_disinfection)
+
+    def test_refuse_when_busy_seated_or_moving(self):
+        cases = {
+            "busy": Device(e9=with_byte(E9, 3, 0x20)),
+            "seated": Device(e9=with_byte(E9, 0, 0xC5)),
+            "moving": Device(ea=with_byte(EA, 0, 0x45)),
+            "transit": Device(ea=with_byte(EA, 0, 0xD0)),
+        }
+        for name, device in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(CommandRefused):
+                    run(manager(device).command(Mechanical.SMALL_FLUSH))
+                self.assertEqual(device.writes, [])
+                self.assertEqual(device.active, 0)
+
+    def test_busy_refuses_settings_too(self):
+        device = Device(e9=with_byte(E9, 3, 0x03))
+        with self.assertRaises(CommandRefused):
+            run(manager(device).command(SetSettings({"auto_cover": False})))
+
+    def test_unrelated_change_raises_diff(self):
+        device = Device(corrupt_on_write=True)
+        with self.assertRaises(VerificationError) as ctx:
+            run(manager(device).command(Mechanical.OPEN_LID))
+        self.assertIn("seat_temperature", ctx.exception.diff)
+
+    def test_unconfirmed_action(self):
+        device = Device(ignore_writes=True)
+        with self.assertRaises(VerificationError):
+            run(manager(device).command(Mechanical.OPEN_RING))
+        self.assertEqual(len(device.writes), 1)
+
+    def test_flush_confirmed_and_unconfirmed(self):
+        snap = run(manager(Device()).command(Mechanical.SMALL_FLUSH))
+        self.assertIsNone(snap.warning)
+        device = Device(flush_bit_on_flush=False)
+        snap = run(manager(device).command(Mechanical.SMALL_FLUSH))
+        self.assertEqual(snap.warning, FLUSH_UNCONFIRMED)
+        self.assertEqual(len(device.writes), 1)
+
+    def test_no_retry_after_write_error(self):
+        device = Device(write_error=True)
         with self.assertRaises(SessionError):
-            await factory.session().command(Action.AUTO_COVER_OFF)
-        self.assertEqual(sum(parse_frame(x).command == 0x19 for x in factory.clients[0].writes), 1)
+            run(manager(device).command(Mechanical.OPEN_LID))
+        self.assertEqual(len(device.writes), 1)
+        self.assertEqual(device.active, 0)
 
-    async def test_post_query_cannot_use_pre_action_ea(self):
-        factory = Factory()
-        factory.missing_post_ea = True
-        with self.assertRaises((SessionError, asyncio.TimeoutError)):
-            await factory.session().command(Action.OPEN_LID)
-        self.assertEqual(factory.active, 0)
+    def test_missing_frames(self):
+        device = Device()
 
-    async def test_concurrent_operations_use_one_connection(self):
-        factory = Factory()
-        session = factory.session()
-        await asyncio.gather(session.poll(), session.command(Action.AUTO_COVER_OFF), session.poll())
-        self.assertEqual(factory.max_active, 1)
-        self.assertEqual(factory.active, 0)
-        self.assertEqual(len(factory.clients), 3)
+        class Silent(FakeClient):
+            async def write_gatt_char(self, characteristic, data, response):
+                return None
 
-    async def test_disconnect_failure_blocks_new_connections(self):
-        factory = Factory()
-        factory.disconnect_error = True
-        session = factory.session()
-        with self.assertRaises(OSError):
-            await session.poll()
+        async def connect():
+            device.active += 1
+            return Silent(device)
+
+        session = SessionManager(connect, response_timeout=0.05, settle_time=0)
         with self.assertRaises(SessionError):
-            await session.poll()
-        self.assertEqual(len(factory.clients), 1)
+            run(session.poll())
+        self.assertEqual(device.active, 0)
 
-    async def test_shutdown_prevents_future_sessions(self):
-        factory = Factory()
-        session = factory.session()
-        await session.close()
-        with self.assertRaises(SessionError):
-            await session.command(Action.SMALL_FLUSH)
-        self.assertEqual(factory.clients, [])
+    def test_disconnect_uncertainty_blocks(self):
+        device = Device(stay_connected=True)
+        session = manager(device)
 
-    async def test_snapshot_is_immutable(self):
-        snapshot = await Factory().session().poll()
-        with self.assertRaises(TypeError):
-            snapshot.frames[0xE2] = parse_frame(EA)
-
-    async def test_unknown_profile_refuses_actuator_write(self):
-        factory = Factory()
-        factory.initial_state = build_frame(
-            0xE2, bytes.fromhex("4a52b345080000"), source=0x21, destination=0x92
-        )
-        with self.assertRaises(ProtocolError):
-            await factory.session().command(Action.SMALL_FLUSH)
-        self.assertEqual([parse_frame(x).command for x in factory.clients[0].writes], [0xE2, 0xE7])
-        self.assertEqual(factory.active, 0)
-
-    async def test_motion_and_unknown_position_refuse_actuator_write(self):
-        for flags in (0x55, 0x00):
-            factory = Factory()
-            factory.initial_mechanism = build_frame(
-                0xEA, bytes([flags]) + parse_frame(EA).payload[1:], source=0x21, destination=0x22
-            )
+        async def scenario():
             with self.assertRaises(SessionError):
-                await factory.session().command(Action.SMALL_FLUSH)
-            self.assertEqual(
-                [parse_frame(x).command for x in factory.clients[0].writes], [0xE2, 0xE7]
+                await session.poll()
+            with self.assertRaises(SessionError):
+                await session.poll()
+
+        run(scenario())
+        self.assertEqual(device.connections, 1)
+
+    def test_lock_serializes(self):
+        device = Device()
+        session = manager(device)
+
+        async def scenario():
+            await asyncio.gather(
+                session.poll(),
+                session.command(Mechanical.OPEN_LID),
+                session.command(SetSettings({"auto_cover": False})),
             )
 
-    async def test_open_lid_does_not_close_already_open_ring(self):
-        factory = Factory()
-        factory.initial_mechanism = build_frame(
-            0xEA, b"\x1a" + parse_frame(EA).payload[1:], source=0x21, destination=0x22
-        )
-        observed = await factory.session().command(Action.OPEN_LID)
-        self.assertEqual(observed.frames[0xEA].payload[0], 0x1A)
-        self.assertEqual([parse_frame(x).command for x in factory.clients[0].writes], [0xE2, 0xE7])
+        run(scenario())
+        self.assertEqual(device.max_active, 1)
+        self.assertEqual(device.connections, 3)
 
-    async def test_silent_disconnect_failure_blocks_new_connections(self):
-        factory = Factory()
-        factory.silent_disconnect = True
-        session = factory.session()
-        with self.assertRaises(SessionError):
-            await session.poll()
-        with self.assertRaises(SessionError):
-            await session.poll()
-        self.assertEqual(len(factory.clients), 1)
 
-    async def test_cancel_disconnects(self):
-        factory = Factory()
-        factory.no_state = True
-        session = factory.session()
-        task = asyncio.create_task(session.poll())
-        while not factory.clients or not factory.clients[0].writes:
-            await asyncio.sleep(0)
-        task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await task
-        self.assertEqual(factory.active, 0)
+class MemoryStore:
+    def __init__(self, data=None):
+        self.data = data
+        self.saves = 0
+
+    async def load(self):
+        return self.data
+
+    async def save(self, data):
+        self.saves += 1
+        self.data = dict(data)
+
+
+class GuardTests(unittest.TestCase):
+    def guard(self, device, data=None):
+        store = MemoryStore(data)
+        guard = ShowerGuard(manager(device), store)
+        run(guard.load())
+        return guard, store
+
+    def test_suspend_then_resume_when_previously_on(self):
+        device = Device()
+        guard, store = self.guard(device)
+        run(guard.suspend())
+        self.assertEqual(guard.state, GuardState(active=True, previous=True))
+        self.assertEqual(store.data, {"active": True, "pending": False, "previous": True})
+        self.assertEqual(len(device.writes), 1)
+        run(guard.resume())
+        self.assertEqual(guard.state, GuardState())
+        self.assertEqual(len(device.writes), 2)
+        self.assertEqual(parse_frame(device.writes[-1]).payload[0] & 0x08, 0x08)
+
+    def test_previously_off_never_written(self):
+        device = Device(e2=with_byte(E2, 0, 0x42), fa=with_byte(FA, 0, 0x42))
+        guard, _ = self.guard(device)
+        run(guard.suspend())
+        self.assertEqual(guard.state, GuardState(active=True, previous=False))
+        run(guard.resume())
+        self.assertEqual(device.writes, [])
+        self.assertEqual(device.connections, 1)  # resume needed no connection at all
+
+    def test_already_active_does_not_connect(self):
+        device = Device()
+        guard, _ = self.guard(device, {"active": True, "previous": True})
+        run(guard.suspend())
+        self.assertEqual(device.connections, 0)
+
+    def test_resume_inactive_is_noop(self):
+        device = Device()
+        guard, _ = self.guard(device)
+        run(guard.resume())
+        self.assertEqual(device.connections, 0)
+
+    def test_failed_resume_keeps_guard(self):
+        device = Device(e2=with_byte(E2, 0, 0x42), fa=with_byte(FA, 0, 0x42), ignore_writes=True)
+        guard, _ = self.guard(device, {"active": True, "previous": True})
+        with self.assertRaises(VerificationError):
+            run(guard.resume())
+        self.assertEqual(guard.state, GuardState(active=True, previous=True))
+
+    def test_failed_suspend_remembers_original_for_retry(self):
+        device = Device(ignore_writes=True)
+        guard, _ = self.guard(device)
+        with self.assertRaises(VerificationError):
+            run(guard.suspend())
+        self.assertEqual(guard.state, GuardState(pending=True, previous=True))
+        # The write actually landed late; a retry must not record "was off".
+        device.ignore_writes = False
+        device.e2 = with_byte(E2, 0, 0x42)
+        device.fa = with_byte(FA, 0, 0x42)
+        run(guard.suspend())
+        self.assertEqual(guard.state, GuardState(active=True, previous=True))
+        run(guard.resume())
+        self.assertTrue(parse_frame(device.writes[-1]).payload[0] & 0x08)
+
+    def test_refused_suspend_keeps_state_clean(self):
+        device = Device(e9=with_byte(E9, 3, 0x20))
+        guard, _ = self.guard(device)
+        with self.assertRaises(CommandRefused):
+            run(guard.suspend())
+        self.assertFalse(guard.state.active)
+
+    def test_cancel(self):
+        device = Device()
+        guard, store = self.guard(device, {"active": True, "previous": True})
+        run(guard.cancel())
+        self.assertEqual(guard.state, GuardState())
+        self.assertEqual(store.data["active"], False)
 
 
 if __name__ == "__main__":

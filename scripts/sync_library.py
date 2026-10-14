@@ -4,7 +4,7 @@ from pathlib import Path
 import argparse
 
 ROOT = Path(__file__).resolve().parents[1]
-FILES = ("__init__.py", "protocol.py", "client.py")
+FILES = ("__init__.py", "protocol.py", "client.py", "guard.py")
 
 
 def main():
