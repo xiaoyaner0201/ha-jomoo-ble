@@ -65,5 +65,12 @@ Verified with read-back and with all other settings unchanged:
   After that fix the retried suspend confirmed off, and `resume_auto_cover` restored on
   and cleared the guard.
 
+## Water-heater signal (same household)
+
+- The A.O. Smith gas heater is in HA through Ai-Link A.O. Smith v1.4.0. The burner-state
+  template drives the shipped blueprint, and the automation is live.
+- The app token lasts 30 minutes. It was renewed and persisted at two consecutive expiries,
+  and the coordinator kept succeeding every 60 s.
+
 Not yet exercised on hardware: the experimental switches and numbers, large flush, and
-the shower guard driven by a real water-heater signal.
+a full shower (hot water on → guard active → off for 3 min → restored).

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0: release candidate
+## 0.2.0
 
 - Full decoders for status frames E2, FA, E9, EA and E7. Unknown bits are kept raw.
 - A general function-frame encoder replaces the exact-profile gate. It is built from a

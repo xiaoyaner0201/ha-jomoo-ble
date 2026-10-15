@@ -142,6 +142,18 @@ template:
         delay_off: "00:00:20"
 ```
 
+Tested pairing: the maintainer's China-market A.O. Smith gas water heater, added through
+the community [Ai-Link A.O. Smith](https://github.com/mopocv/Ai-Link_A.O.Smith)
+integration (v1.4.0 or newer, which renews its short-lived app token by itself). Its
+*burner heating* sensor (`heating`) is the trigger:
+
+```yaml
+state: "{{ is_state('sensor.<heater>_ran_shao_jia_re_zhuang_tai', '加热中') }}"
+```
+
+Prefer burner state over flow rate there: the flow reading was non-zero once while no
+tap was open.
+
 Guard semantics: suspend remembers the current value and only writes *off* if it was on;
 resume only writes *on* if it was on before, and never writes *off*. Changing the switch
 by hand while the guard is active cancels the guard, so your manual choice wins. The
