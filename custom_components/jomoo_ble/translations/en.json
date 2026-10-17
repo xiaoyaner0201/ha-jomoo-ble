@@ -30,8 +30,9 @@
     "step": {
       "init": {
         "title": "Controls and refresh",
-        "description": "Every connection makes the toilet beep and blocks the official app for a few seconds, so automatic polling is off by default (0).",
+        "description": "Connections beep and only one central is allowed. Opt-in live status holds Bluetooth continuously, blocking the official app until disabled/unloaded; initial connection beeps. In stream mode polling is ignored and disconnect requires manual Refresh status to retry.",
         "data": {
+          "enable_status_stream": "Enable persistent live status (single central; connection beeps)",
           "enable_controls": "Enable verified controls (lid, seat ring, small flush, automatic lid opening, shower guard)",
           "enable_experimental": "Enable experimental controls (not yet verified on hardware)",
           "poll_interval": "Automatic refresh interval in seconds (0 = off, otherwise 300–86400)"
@@ -44,6 +45,7 @@
   },
   "entity": {
     "binary_sensor": {
+      "status_stream_connected": {"name": "Live status connection"},
       "lid_open": {
         "name": "Lid"
       },
@@ -128,6 +130,7 @@
       }
     },
     "sensor": {
+      "last_status_received": {"name": "Last status received"},
       "filter_remaining": {
         "name": "Filter remaining"
       },
@@ -201,7 +204,7 @@
   "services": {
     "refresh": {
       "name": "Refresh status",
-      "description": "Connect briefly, read the full status and disconnect. The toilet beeps once.",
+      "description": "Read fresh status. With live status enabled, reuse the connection or manually retry once after loss; otherwise connect briefly and disconnect. A new connection beeps.",
       "fields": {
         "device_id": {
           "name": "Toilet",

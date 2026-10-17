@@ -17,6 +17,7 @@ from homeassistant.core import callback
 
 from .bluetooth import make_session, supported_name
 from .const import (
+    CONF_ENABLE_STATUS_STREAM,
     CONF_ENABLE_CONTROLS,
     CONF_ENABLE_EXPERIMENTAL,
     CONF_NAME_PREFIX,
@@ -59,6 +60,7 @@ class JomooConfigFlow(ConfigFlow, domain=DOMAIN):
             title=f"JOMOO {MODEL}",
             data={CONF_ADDRESS: address, CONF_NAME_PREFIX: prefix},
             options={
+                CONF_ENABLE_STATUS_STREAM: False,
                 CONF_ENABLE_CONTROLS: False,
                 CONF_ENABLE_EXPERIMENTAL: False,
                 CONF_POLL_INTERVAL: DEFAULT_POLL_INTERVAL,
@@ -159,6 +161,10 @@ class JomooOptionsFlow(OptionsFlow):
             errors=errors,
             data_schema=vol.Schema(
                 {
+                    vol.Required(
+                        CONF_ENABLE_STATUS_STREAM,
+                        default=options.get(CONF_ENABLE_STATUS_STREAM, False),
+                    ): bool,
                     vol.Required(
                         CONF_ENABLE_CONTROLS, default=options.get(CONF_ENABLE_CONTROLS, False)
                     ): bool,

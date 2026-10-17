@@ -38,6 +38,11 @@ class RefreshButton(JomooEntity, ButtonEntity):
     _attr_icon = "mdi:refresh"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
+    @property
+    def available(self) -> bool:
+        # The existing button is also explicit permission for one reconnection attempt.
+        return not self.coordinator.session.blocked
+
     async def async_press(self) -> None:
         await self.coordinator.async_refresh_now()
 

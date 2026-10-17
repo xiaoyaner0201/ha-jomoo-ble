@@ -31,6 +31,7 @@ def make_session(hass: HomeAssistant, address: str, prefix: str) -> SessionManag
                 device,
                 "JOMOO BLE",
                 max_attempts=2,
+                disconnected_callback=lambda client: session.connection_lost(client),
                 ble_device_callback=lambda: (
                     bluetooth.async_ble_device_from_address(hass, address, connectable=True)
                     or device
@@ -39,4 +40,5 @@ def make_session(hass: HomeAssistant, address: str, prefix: str) -> SessionManag
             timeout=90,
         )
 
-    return SessionManager(connect)
+    session = SessionManager(connect)
+    return session

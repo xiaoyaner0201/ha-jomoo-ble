@@ -27,6 +27,11 @@ E7 = bytes.fromhex("f3f4082192e701c3131c95fc")
 
 async def main():
     from homeassistant import core, loader
+    from homeassistant.const import __version__
+
+    assert __version__ == "2026.9.1", __version__
+    print("Home Assistant", __version__)
+    from homeassistant.exceptions import HomeAssistantError
     from homeassistant.helpers import entity_registry as er, translation
     from homeassistant.setup import async_setup_component
 
@@ -55,7 +60,16 @@ async def main():
     client_mod = importlib.import_module("custom_components.jomoo_ble.lib.client")
     btmod = importlib.import_module("custom_components.jomoo_ble.bluetooth")
 
-    state = {"e2": E2, "fa": FA, "e9": E9, "ea": EA, "conns": 0, "writes": []}
+    state = {
+        "e2": E2,
+        "fa": FA,
+        "e9": E9,
+        "ea": EA,
+        "conns": 0,
+        "writes": [],
+        "queries": [],
+        "connect_error": False,
+    }
 
     def with_byte(frame, i, v):
         p = proto.parse_frame(frame)
@@ -63,14 +77,22 @@ async def main():
         pl[i] = v
         return proto.build_frame(p.command, bytes(pl), p.source, p.destination)
 
+    clients = []
+
     class FakeClient:
-        is_connected = True
+        def __init__(self, disconnected_callback):
+            self.is_connected = True
+            self.disconnected_callback = disconnected_callback
+            clients.append(self)
+            assert sum(c.is_connected for c in clients) == 1
 
         async def start_notify(self, ch, cb):
             self.cb = cb
 
         async def write_gatt_char(self, ch, data, response):
             f = proto.parse_frame(bytes(data))
+            if f.command in (0xE2, 0xE7):
+                state["queries"].append(f.command)
             if f.command == 0xE2:
                 for x in (state["e2"], state["ea"], state["e9"], state["fa"]):
                     self.cb(None, bytearray(x))
@@ -90,27 +112,29 @@ async def main():
                 state["fa"] = with_byte(state["fa"], 4, 0x15)
 
         async def disconnect(self):
+            if state.get("disconnect_uncertain"):
+                return  # backend fails to release, while reporting success
             self.is_connected = False
+            self.disconnected_callback(self)
 
-    def fake_make_session(hass_, address, prefix):
-        async def connect():
-            state["conns"] += 1
-            return FakeClient()
+    async def fake_establish(client_class, device, name, **kwargs):
+        assert kwargs["max_attempts"] == 2
+        state["conns"] += 1
+        if state["connect_error"]:
+            raise OSError("synthetic establish failure")
+        return FakeClient(kwargs["disconnected_callback"])
 
-        return client_mod.SessionManager(
-            connect,
-            response_timeout=1,
-            action_timeout=2,
-            flush_confirm_timeout=1,
-            settle_time=0,
-            poll_gap=0,
-        )
+    # Keep the real HA routing adapter and SessionManager; fake only radio discovery
+    # and physical establishment. No real Bluetooth integration or adapter is started.
+    from types import SimpleNamespace
 
-    btmod.make_session = fake_make_session
+    btmod.establish_connection = fake_establish
+    btmod.bluetooth.async_last_service_info = lambda *a, **kw: SimpleNamespace(
+        name="JOMOO_SMART_237369"
+    )
+    btmod.bluetooth.async_ble_device_from_address = lambda *a, **kw: object()
     coord_mod = importlib.import_module("custom_components.jomoo_ble.coordinator")
-    coord_mod.make_session = fake_make_session
     flow_mod = importlib.import_module("custom_components.jomoo_ble.config_flow")
-    flow_mod.make_session = fake_make_session
     flow_mod.async_discovered_service_info = lambda hass, connectable=True: []
 
     # translations / strings sanity through HA's own loader
@@ -135,14 +159,22 @@ async def main():
     entry = hass.config_entries.async_entries("jomoo_ble")[0]
     await hass.async_block_till_done()
     print("entry state", entry.state, "conns after setup (should be 1 = flow only)", state["conns"])
+    assert state["conns"] == 1
+    assert not entry.runtime_data.stream_enabled
+    assert not any(c.is_connected for c in clients)
 
     ents = [e for e in er.async_get(hass).entities.values() if e.config_entry_id == entry.entry_id]
+    assert not any(
+        e.unique_id.endswith(("_status_stream_connected", "_last_status_received")) for e in ents
+    )
     print("entities", len(ents), "disabled-by-default", sum(1 for e in ents if e.disabled_by))
     sw = next(e.entity_id for e in ents if e.unique_id.endswith("_auto_cover"))
     print("auto_cover state before refresh", hass.states.get(sw).state)
 
     # Refresh button -> state populated
-    btn = next(e.entity_id for e in ents if e.unique_id.endswith("_refresh"))
+    btn = next(
+        e.entity_id for e in ents if e.domain == "button" and e.unique_id.endswith("_refresh")
+    )
     await hass.services.async_call("button", "press", {"entity_id": btn}, blocking=True)
     print(
         "after refresh: auto_cover",
@@ -214,7 +246,9 @@ async def main():
         "lid after open",
         hass.states.get(next(e.entity_id for e in ents if e.unique_id.endswith("_lid_open"))).state,
     )
-    fb = next(e.entity_id for e in ents if e.unique_id.endswith("_small_flush"))
+    fb = next(
+        e.entity_id for e in ents if e.domain == "button" and e.unique_id.endswith("_small_flush")
+    )
     await hass.services.async_call("button", "press", {"entity_id": fb}, blocking=True)
     print(
         "flushing",
@@ -238,11 +272,196 @@ async def main():
     d = await diag.async_get_config_entry_diagnostics(hass, entry)
     print("diag address redacted:", d["entry"]["data"]["address"], "guard", d["guard"])
 
+    # Opt-in stream lifecycle through real options reload, entities and services.
+    old_ids = {e.unique_id: e.entity_id for e in ents}
+    before = state["conns"]
+    query_count = len(state["queries"])
+    writes_before_stream = len(state["writes"])
+    r = await hass.config_entries.options.async_init(entry.entry_id)
+    await hass.config_entries.options.async_configure(
+        r["flow_id"],
+        {
+            "enable_controls": True,
+            "enable_experimental": False,
+            "poll_interval": 300,
+            "enable_status_stream": True,
+        },
+    )
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data
+    assert isinstance(coordinator, coord_mod.JomooCoordinator)
+    assert isinstance(coordinator.session, client_mod.SessionManager)
+    assert coordinator.update_interval is None  # stream never schedules polling
+    assert state["conns"] == before + 1
+    assert state["queries"][query_count:] == [0xE2, 0xE7]
+    assert len(state["writes"]) == writes_before_stream
+    assert coordinator.session.stream_connected
+    ents = [e for e in er.async_get(hass).entities.values() if e.config_entry_id == entry.entry_id]
+    assert all(old_ids.get(e.unique_id, e.entity_id) == e.entity_id for e in ents)
+    assert not any("refill" in e.unique_id for e in ents)
+
+    def eid(suffix):
+        return next(e.entity_id for e in ents if e.unique_id.endswith(suffix))
+
+    live = eid("_status_stream_connected")
+    received = eid("_last_status_received")
+    flushing = eid("_flushing")
+    assert hass.states.get(live).state == "on"
+    for value, expected in ((0x11, "off"), (0x15, "on"), (0x11, "off")):
+        clients[-1].cb(None, bytearray(with_byte(FA, 4, value)))
+        await hass.async_block_till_done()
+        assert hass.states.get(flushing).state == expected
+    timestamp = hass.states.get(received).state
+    await asyncio.sleep(0.02)
+    await hass.async_block_till_done()
+    assert hass.states.get(received).state == timestamp
+    assert state["queries"][query_count:] == [0xE2, 0xE7]
+    assert "0xE2" in hass.states.get(received).attributes["frame_received_at"]
+    physical = state["conns"]
+    await asyncio.gather(
+        coordinator.async_command(client_mod.SetSettings({"auto_cover": False})),
+        coordinator.async_refresh_now(),
+        coordinator.async_refresh_now(),
+    )
+    assert state["conns"] == physical
+    await coordinator.async_command(client_mod.SetSettings({"auto_cover": True}))
+    writes_before_guard = len(state["writes"])
+    await hass.services.async_call(
+        "jomoo_ble", "suspend_auto_cover", {"entity_id": sw}, blocking=True
+    )
+    assert entry.runtime_data.guard_state.previous is True
+    assert entry.runtime_data.guard_state.active
+    assert hass.states.get(sw).state == "off"
+    await hass.services.async_call(
+        "jomoo_ble", "resume_auto_cover", {"entity_id": sw}, blocking=True
+    )
+    assert len(state["writes"]) == writes_before_guard + 2
+    assert hass.states.get(sw).state == "on"
+    assert state["conns"] == physical
+    assert not entry.runtime_data.guard_state.active
+
+    # Physical loss immediately invalidates state. No timer or command reconnects.
+    lost_client = clients[-1]
+    await lost_client.disconnect()
+    await hass.async_block_till_done()
+    assert hass.states.get(live).state == "off"
+    assert hass.states.get(flushing).state == "unavailable"
+    assert hass.states.get(btn).state != "unavailable"
+    assert not hass.states.get(received).attributes["live"]
+    try:
+        await coordinator.async_command(client_mod.SetSettings({"auto_cover": True}))
+        raise AssertionError("control reconnected without manual permission")
+    except HomeAssistantError:
+        pass
+    await asyncio.sleep(0.02)
+    assert state["conns"] == physical
+    await asyncio.gather(*(coordinator.async_refresh_now() for _ in range(6)))
+    await hass.async_block_till_done()
+    assert state["conns"] == physical + 1
+    assert hass.states.get(live).state == "on"
+    # A queued callback from the previous connection must not revive/alter state.
+    snapshot = coordinator.data
+    lost_client.cb(None, bytearray(with_byte(FA, 4, 0x15)))
+    assert coordinator.data is snapshot
+
+    # Disable via options: physical socket released and legacy IDs preserved.
+    previous = clients[-1]
+    r = await hass.config_entries.options.async_init(entry.entry_id)
+    await hass.config_entries.options.async_configure(
+        r["flow_id"],
+        {
+            "enable_controls": True,
+            "enable_experimental": False,
+            "poll_interval": 0,
+            "enable_status_stream": False,
+        },
+    )
+    await hass.async_block_till_done()
+    assert not previous.is_connected
+    assert coordinator.session._changed is None
+    assert coordinator.session._window is None
+    assert not coordinator.session._lock.locked()
+    assert not any(c.is_connected for c in clients)
+    print(
+        "stream lifecycle assertions PASS: startup, off/on/off, freshness, single client, guard, loss, manual recovery, option release, IDs"
+    )
+
+    # Failed opt-in startup remains loaded/off, never entering HA setup retry.
+    before = state["conns"]
+    state["connect_error"] = True
+    r = await hass.config_entries.options.async_init(entry.entry_id)
+    await hass.config_entries.options.async_configure(
+        r["flow_id"],
+        {
+            "enable_controls": True,
+            "enable_experimental": False,
+            "poll_interval": 0,
+            "enable_status_stream": True,
+        },
+    )
+    await hass.async_block_till_done()
+    assert entry.state is ce.ConfigEntryState.LOADED
+    assert state["conns"] == before + 1
+    assert hass.states.get(live).state == "off"
+    assert hass.states.get(flushing).state == "unavailable"
+    assert entry.runtime_data.update_interval is None
+    assert entry.runtime_data.data is None
+    assert entry.runtime_data._unsub_refresh is None
+    state["connect_error"] = False
+    await hass.services.async_call("button", "press", {"entity_id": btn}, blocking=True)
+    await hass.async_block_till_done()
+    assert state["conns"] == before + 2
+    assert clients[-1].is_connected
+
     # Unload
     ok = await hass.config_entries.async_unload(entry.entry_id)
+    assert ok
+    assert not any(c.is_connected for c in clients)
     print("unload", ok, entry.state)
-    print("total writes", len(state["writes"]), "total connections", state["conns"])
+    before = state["conns"]
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert state["conns"] == before + 1
+    assert clients[-1].is_connected
+
+    if "--uncertainty" in sys.argv:
+        # HA marks failed unload non-recoverable: this must not free ownership or
+        # permit another physical connection. Run separately from normal-stop test.
+        coordinator = entry.runtime_data
+        physical = state["conns"]
+        state["disconnect_uncertain"] = True
+        assert not await hass.config_entries.async_unload(entry.entry_id)
+        assert entry.state is ce.ConfigEntryState.FAILED_UNLOAD
+        assert coordinator.session.blocked
+        assert clients[-1].is_connected
+        assert hass.states.get(live).state == "off"
+        assert hass.states.get(flushing).state == "unavailable"
+        assert hass.states.get(live).attributes["disconnect_uncertain"]
+        try:
+            await hass.config_entries.async_reload(entry.entry_id)
+            raise AssertionError("reload bypassed failed unload")
+        except ce.OperationNotAllowed:
+            pass
+        assert state["conns"] == physical
+        try:
+            await coordinator.async_command(client_mod.SetSettings({"auto_cover": True}))
+            raise AssertionError("uncertain disconnect allowed control")
+        except HomeAssistantError:
+            pass
+        # Test-only physical recovery for cleanup; no integration reconnect/retry loop.
+        state["disconnect_uncertain"] = False
+        await coordinator.async_close()
+        assert not any(c.is_connected for c in clients)
+        print("uncertain release/FAILED_UNLOAD/reload/control blocking assertions PASS")
+
     await hass.async_stop(force=True)
+    assert not any(c.is_connected for c in clients)
+    assert entry.runtime_data.session._changed is None
+    assert not entry.runtime_data.session._lock.locked()
+    print(
+        "failed startup/manual recovery/entry restart with retained options/HA stop assertions PASS"
+    )
+    print("total writes", len(state["writes"]), "total connections", state["conns"])
     shutil.rmtree(cfg, ignore_errors=True)
 
 

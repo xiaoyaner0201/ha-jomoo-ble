@@ -5,7 +5,9 @@ Assistant runtime, and physical hardware.
 
 ## Offline (CI)
 
-- `python -m unittest discover -s tests -v` runs 38 tests on Python 3.13 and 3.14.
+- `python -m unittest discover -s tests -v` covers protocol, sessions and guard;
+  the stream candidate adds synthetic acquisition/lifecycle tests (exact executed count
+  and interpreter versions are recorded in its delivery report).
   - Every decoder is checked against the hardware fixtures.
   - All seven verified function-frame vectors are reproduced byte for byte.
   - A single-field change only touches its own bits.
@@ -28,7 +30,7 @@ Assistant runtime, and physical hardware.
 `tests/ha_smoke/smoke_in_ha_container.py` checks the following:
 
 - The manifest and Bluetooth matcher load, and en / zh-Hans translations resolve
-  (52 entity strings each).
+  (54 entity strings each).
 - A config flow with a bad MAC returns the form error; a valid one creates the entry
   with a single connection.
 - Setup makes no extra connection. Entities start as *unknown*, not unavailable.
@@ -43,6 +45,24 @@ Assistant runtime, and physical hardware.
 - The open-lid and small-flush buttons are confirmed by read-back.
 - The `jomoo_ble.refresh` service connects once.
 - Diagnostics redact the address, and unload succeeds.
+
+## Opt-in stream candidate (offline and HA container only)
+
+See [status-stream.md](status-stream.md) for semantics and the tests added for the candidate.
+The stream implementation itself has not contacted physical hardware or production HA.
+The earlier 90-second passive observation is protocol evidence, not deployment acceptance.
+Its unknown FA payload[5] bit0 remains unknown; there is no refill sensor or pump policy.
+
+The extended smoke test uses the real HA 2026.9.1 coordinator, entities, services, options
+and registry, faking only BLE discovery/establishment and device traffic. It also fixes
+old smoke entity lookups that matched `last_refresh` instead of the Refresh button and
+`auto_small_flush` instead of the small-flush button. Assertions now target actual buttons.
+Stream tests assert startup/no polling, off/on/off, timestamps, one physical client,
+guard preservation, loss/unavailability, coalesced recovery, failed startup without a
+scheduled retry, option release, stable IDs, entry restart with retained options, unload and HA stop.
+A second `--uncertainty` run verifies failed physical release retains ownership,
+marks HA FAILED_UNLOAD, blocks reload/control, and exposes the diagnostic.
+These are synthetic assertions, not real proxy or toilet results.
 
 ## Hardware (one ZS800J, ESPHome proxy beside the toilet)
 

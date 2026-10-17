@@ -87,6 +87,31 @@ example. Setup performs one read-only query (one beep).
 | Enable verified controls | off | Lid, seat ring, small flush, automatic lid opening, shower guard |
 | Enable experimental controls | off | Everything marked *Experimental* below |
 | Automatic refresh interval | 0 (off) | 0, or 300 – 86400 seconds |
+| Persistent live status (`enable_status_stream`) | off | Hold one shared BLE connection; ignore polling while enabled |
+
+### Opt-in live status (candidate, not hardware-accepted)
+
+Enable this in the integration options only if you accept continuous single-central
+ownership: the initial connection beeps and the official app cannot connect until HA
+releases Bluetooth. Initial validated E2/EA/E9/FA/E7 queries seed the snapshot; passive
+notifications then update existing entities, including Flushing. This is not a refill
+sensor: FA payload[5] bit0 is still unknown.
+
+Stream, refresh, commands and shower guard share the same physical connection and
+operation lock. Controls still require a new full query window, preserve other settings,
+write once and verify by read-back; stream caches never supply control settings.
+No periodic query/reconnect or automatic recovery is scheduled. After loss, state is
+unavailable; press the existing Refresh status button (or call `jomoo_ble.refresh`) for
+one coalesced recovery attempt. Underlying bounded establish retries are unchanged.
+Disabling the option, unloading, or stopping HA releases the connection; uncertain
+release blocks control and is not reported as success.
+
+Only when opted in, Live status connection and Last status received diagnostic entities
+are added. Receive timestamps advance only on valid packets, with per-frame timestamps;
+Last refresh still means an explicit complete query. Silence is not a new measurement,
+and a connected backend without heartbeats is not proof that every field is current.
+See [acquisition semantics and verification boundaries](docs/status-stream.md).
+The candidate has synthetic BLE / real-HA lifecycle coverage, not live HA/proxy acceptance.
 
 ## Entities
 
@@ -187,6 +212,12 @@ protection.
 - Experimental controls are app-derived and unverified on hardware.
 
 ## Development
+
+To repeat the isolated HA candidate checks, run the official 2026.9.1 image with
+`--network none --memory 2g --cpus 2 --rm`, mount this checkout read-only at `/repo`,
+and execute `python3 /repo/tests/ha_smoke/smoke_in_ha_container.py /repo`.
+Repeat with `--uncertainty` after `/repo` to test conservative failed-unload behavior.
+Do not mount a production config or Bluetooth hardware.
 
 ```sh
 python -m unittest discover -s tests -v   # protocol + synthetic BLE + shower guard
