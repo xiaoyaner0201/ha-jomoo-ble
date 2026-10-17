@@ -122,6 +122,15 @@ async def main():
         state["conns"] += 1
         if state["connect_error"]:
             raise OSError("synthetic establish failure")
+        if (old := state.get("late_loss_client")) is not None:
+            asyncio.get_running_loop().call_soon(old.disconnected_callback, old)
+        if state.get("handoff_loss"):
+            client = FakeClient(kwargs["disconnected_callback"])
+            # Authoritative transport event before adapter/shield adoption, while
+            # the backend property and complete status responder deliberately lag.
+            asyncio.get_running_loop().call_soon(kwargs["disconnected_callback"], client)
+            state["handoff_callbacks"] = state.get("handoff_callbacks", 0) + 1
+            return client
         return FakeClient(kwargs["disconnected_callback"])
 
     # Keep the real HA routing adapter and SessionManager; fake only radio discovery
@@ -273,6 +282,7 @@ async def main():
     print("diag address redacted:", d["entry"]["data"]["address"], "guard", d["guard"])
 
     # Opt-in stream lifecycle through real options reload, entities and services.
+    state["handoff_loss"] = "--handoff" in sys.argv
     old_ids = {e.unique_id: e.entity_id for e in ents}
     before = state["conns"]
     query_count = len(state["queries"])
@@ -293,8 +303,64 @@ async def main():
     assert isinstance(coordinator.session, client_mod.SessionManager)
     assert coordinator.update_interval is None  # stream never schedules polling
     assert state["conns"] == before + 1
-    assert state["queries"][query_count:] == [0xE2, 0xE7]
+    # A latched handoff loss is released before even registering notifications.
+    expected_queries = [] if coordinator.session._connection_lost else [0xE2, 0xE7]
+    assert state["queries"][query_count:] == expected_queries
     assert len(state["writes"]) == writes_before_stream
+    if "--handoff" in sys.argv:
+        current = [
+            e for e in er.async_get(hass).entities.values() if e.config_entry_id == entry.entry_id
+        ]
+
+        def handoff_eid(suffix):
+            return next(e.entity_id for e in current if e.unique_id.endswith(suffix))
+
+        live = handoff_eid("_status_stream_connected")
+        flushing = handoff_eid("_flushing")
+        lost = clients[-1]
+        assert state["handoff_callbacks"] == 1
+        assert not coordinator.session.stream_connected
+        assert coordinator.session.stream_snapshot is None
+        assert coordinator.data is None
+        assert entry.state is ce.ConfigEntryState.LOADED
+        assert hass.states.get(live).state == "off"
+        assert hass.states.get(flushing).state == "unavailable"
+        assert not lost.is_connected  # physical release, not just logical unavailability
+        physical = state["conns"]
+        try:
+            await coordinator.async_command(client_mod.Mechanical.SMALL_FLUSH)
+            raise AssertionError("handoff loss allowed mechanical write")
+        except HomeAssistantError:
+            pass
+        await asyncio.sleep(0.02)
+        await hass.async_block_till_done()
+        assert state["conns"] == physical
+        assert len(state["writes"]) == writes_before_stream
+        # Only an explicit refresh may recover; old callbacks during and after it
+        # cannot contaminate the new client. Adapter/coordinator/entities are real.
+        lost.disconnected_callback(lost)
+        state["handoff_loss"] = False
+        state["late_loss_client"] = lost
+        await hass.services.async_call("button", "press", {"entity_id": btn}, blocking=True)
+        await hass.async_block_till_done()
+        assert state["conns"] == physical + 1
+        assert coordinator.session.stream_connected
+        assert hass.states.get(live).state == "on"
+        snap = coordinator.data
+        lost.disconnected_callback(lost)
+        await hass.async_block_till_done()
+        assert coordinator.data is snap
+        assert hass.states.get(live).state == "on"
+        await hass.async_stop(force=True)
+        assert not any(c.is_connected for c in clients)
+        assert coordinator.session._changed is None
+        assert coordinator.session._establish_losses is None
+        assert not coordinator.session._lock.locked()
+        print(
+            "handoff assertions PASS: callback=1, released, HA off/unavailable, no control/reconnect, manual recovery, old identity ignored, HA stop"
+        )
+        shutil.rmtree(cfg, ignore_errors=True)
+        return
     assert coordinator.session.stream_connected
     ents = [e for e in er.async_get(hass).entities.values() if e.config_entry_id == entry.entry_id]
     assert all(old_ids.get(e.unique_id, e.entity_id) == e.entity_id for e in ents)

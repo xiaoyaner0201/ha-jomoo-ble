@@ -186,6 +186,7 @@ class SessionManager:
         self._changed: Optional[Callable[[], None]] = None
         self._client: Optional[Client] = None
         self._connection_lost = False
+        self._establish_losses: Optional[list[Client]] = None
         self._window: Optional[_Window] = None
         self._decoder = FrameDecoder()
         self.stream_snapshot: Optional[Snapshot] = None
@@ -212,6 +213,10 @@ class SessionManager:
     def connection_lost(self, client: Client) -> None:
         """Called by the transport on the event loop; never reconnect here."""
         if client is not self._client:
+            if self._establish_losses is not None:
+                # The returning client is not known yet. Match by identity on adopt;
+                # late callbacks from old/retried clients must not poison this attempt.
+                self._establish_losses.append(client)
             return
         self._connection_lost = True
         self.stream_snapshot = None
@@ -297,18 +302,24 @@ class SessionManager:
             if self._client is None:
                 # Establishment can finish after cancellation. Retain ownership until
                 # its bounded result is known, then physically release before returning.
-                connecting = asyncio.ensure_future(self._connect())
+                losses: list[Client] = []
+                self._establish_losses = losses
                 try:
-                    self._client = await asyncio.shield(connecting)
-                except asyncio.CancelledError:
+                    connecting = asyncio.ensure_future(self._connect())
                     try:
-                        self._client = await connecting
-                    except Exception:
-                        raise asyncio.CancelledError from None
-                    await self._release()
-                    raise
+                        self._client = await asyncio.shield(connecting)
+                    except asyncio.CancelledError:
+                        try:
+                            self._client = await connecting
+                        except Exception:
+                            raise asyncio.CancelledError from None
+                        await self._release()
+                        raise
+                    self._connection_lost = any(client is self._client for client in losses)
+                finally:
+                    # Failure/cancellation must not retain identities for a later attempt.
+                    self._establish_losses = None
                 self._decoder = FrameDecoder()
-                self._connection_lost = False
                 new_connection = True
             else:
                 new_connection = False
@@ -319,6 +330,8 @@ class SessionManager:
             try:
                 if self._closed:
                     raise SessionError("Session closed during connection")
+                if self._connection_lost:
+                    raise SessionError("Connection lost during establishment")
                 if new_connection:
                     await asyncio.wait_for(
                         client.start_notify(

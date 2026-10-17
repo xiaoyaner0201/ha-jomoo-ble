@@ -216,7 +216,9 @@ protection.
 To repeat the isolated HA candidate checks, run the official 2026.9.1 image with
 `--network none --memory 2g --cpus 2 --rm`, mount this checkout read-only at `/repo`,
 and execute `python3 /repo/tests/ha_smoke/smoke_in_ha_container.py /repo`.
-Repeat with `--uncertainty` after `/repo` to test conservative failed-unload behavior.
+Repeat with `--uncertainty` after `/repo` to test conservative failed-unload behavior,
+then with `--handoff` to exercise transport loss before connection adoption through
+real HA adapter, coordinator and entities (including release and manual recovery).
 Do not mount a production config or Bluetooth hardware.
 
 ```sh
