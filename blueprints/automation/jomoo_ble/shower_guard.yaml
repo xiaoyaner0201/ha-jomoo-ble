@@ -1,33 +1,51 @@
 blueprint:
-  name: JOMOO shower guard
+  name: JOMOO shower guard — HA-native (v0.4.0+)
   description: >-
-    While the water heater is delivering hot water, turn the toilet's automatic lid
-    opening off; when hot water stops for a while, restore whatever it was before.
-    Requires "Enable verified controls" in the JOMOO BLE integration options.
+    HA-native snapshot/restore using only scene and switch actions. Select the
+    toilet's Automatic lid opening and Foot sensor switches (enable verified
+    controls first), or other switches. Hot water on snapshots their original
+    on/off states once and turns on switches off, with at most 5 attempts 30 s
+    apart. A failed switch does not block the others; attempts stop when hot
+    water stops. Off for the restore delay restores the snapshot and deletes it.
+    Use a unique lowercase scene_id (letters, digits, underscores) per automation;
+    reserve it exclusively for this blueprint. Do not change inputs while paused.
+    All switches must have known on/off states before a new snapshot is taken.
+    Recovery at HA start and every 5 min covers a dropped off timer while the
+    scene still exists. IMPORTANT: scene.create scenes do NOT survive HA restart
+    or scene reload. A restart during a pause cannot automatically restore the
+    original values. For restart-proof restore, build an automation with one
+    persistent input_boolean per switch, or check the switches manually.
+    Manual switch changes during a pause do not cancel snapshot restoration.
+    Check automation traces and switches after errors; restore is best effort.
   domain: automation
   source_url: https://github.com/xiaoyaner0201/ha-jomoo-ble/blob/main/blueprints/automation/jomoo_ble/shower_guard.yaml
   input:
     hot_water:
       name: Hot water flowing
-      description: >-
-        A binary sensor that is on only while hot water is actually flowing (not merely
-        while the heater is powered). See the README for template examples.
+      description: A binary sensor that is on while hot water is in use, not just heater power.
       selector:
         entity:
           domain: binary_sensor
-    toilet:
-      name: Toilet automatic lid opening switch
+    switches:
+      name: Switches to pause
+      description: Select Automatic lid opening and Foot sensor, or other switches. Select at least one.
       selector:
         entity:
           domain: switch
-          integration: jomoo_ble
+          multiple: true
     off_delay:
       name: Restore delay
-      description: How long hot water must stay off before automatic lid opening is restored.
+      description: How long hot water must stay off before the original switch states are restored.
       default:
-        minutes: 3
+        minutes: 10
       selector:
         duration: {}
+    scene_id:
+      name: Snapshot scene ID
+      description: Unique reserved lowercase object ID, without the scene. prefix.
+      default: jomoo_shower_guard_before
+      selector:
+        text: {}
 
 mode: queued
 max: 10
@@ -42,55 +60,89 @@ trigger:
     to: "off"
     for: !input off_delay
     id: stop
+  - platform: homeassistant
+    event: start
+    id: recovery
+  - platform: time_pattern
+    minutes: "/5"
+    id: recovery
 
 variables:
-  toilet: !input toilet
   hot_water: !input hot_water
+  switches: !input switches
+  restore_delay: !input off_delay
+  snapshot_id: !input scene_id
+  snapshot_scene: "{{ 'scene.' ~ snapshot_id }}"
 
 action:
+  - condition: template
+    value_template: >-
+      {{ switches | count > 0 and snapshot_id is match('^[a-z0-9]+(?:_[a-z0-9]+)*$') }}
   - choose:
       - conditions:
           - condition: trigger
             id: start
+          - condition: template
+            value_template: "{{ is_state(hot_water, 'on') }}"
         sequence:
+          - if:
+              - condition: template
+                value_template: "{{ states[snapshot_scene] is none }}"
+            then:
+              - condition: template
+                value_template: >-
+                  {{ expand(switches) | count == switches | count
+                     and expand(switches) | map(attribute='state')
+                         | reject('in', ['on', 'off']) | list | count == 0 }}
+              - service: scene.create
+                data:
+                  scene_id: "{{ snapshot_id }}"
+                  snapshot_entities: !input switches
+          - wait_template: "{{ states[snapshot_scene] is not none }}"
+            timeout:
+              seconds: 5
+            continue_on_timeout: false
           - repeat:
-              sequence:
-                - service: jomoo_ble.suspend_auto_cover
-                  target:
-                    entity_id: !input toilet
-                  continue_on_error: true
-                - if:
-                    - condition: template
-                      value_template: "{{ not state_attr(toilet, 'guard_active') }}"
-                  then:
-                    - delay:
-                        seconds: 30
-              until:
+              while:
                 - condition: template
                   value_template: >-
-                    {{ state_attr(toilet, 'guard_active') or repeat.index >= 5
-                       or is_state(hot_water, 'off') }}
-      - conditions:
-          - condition: trigger
-            id: stop
-        sequence:
-          - repeat:
+                    {{ is_state(hot_water, 'on') and repeat.index <= 5
+                       and switches | reject('is_state', 'off') | list | count > 0 }}
               sequence:
-                - service: jomoo_ble.resume_auto_cover
-                  target:
-                    entity_id: !input toilet
-                  continue_on_error: true
+                - repeat:
+                    for_each: !input switches
+                    sequence:
+                      - if:
+                          - condition: template
+                            value_template: >-
+                              {{ is_state(hot_water, 'on') and is_state(repeat.item, 'on') }}
+                        then:
+                          - service: switch.turn_off
+                            target:
+                              entity_id: "{{ repeat.item }}"
+                            continue_on_error: true
                 - if:
                     - condition: template
                       value_template: >-
-                        {{ state_attr(toilet, 'guard_active')
-                           or state_attr(toilet, 'guard_pending') }}
+                        {{ is_state(hot_water, 'on') and repeat.index < 5
+                           and switches | reject('is_state', 'off') | list | count > 0 }}
                   then:
-                    - delay:
+                    - wait_template: >-
+                        {{ not is_state(hot_water, 'on')
+                           or switches | reject('is_state', 'off') | list | count == 0 }}
+                      timeout:
                         seconds: 30
-              until:
-                - condition: template
-                  value_template: >-
-                    {{ not (state_attr(toilet, 'guard_active')
-                            or state_attr(toilet, 'guard_pending'))
-                       or repeat.index >= 5 or is_state(hot_water, 'on') }}
+                      continue_on_timeout: true
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ is_state(hot_water, 'off') and states[snapshot_scene] is not none
+                 and (as_timestamp(now()) - as_timestamp(states[hot_water].last_changed))
+                     >= timedelta(**restore_delay).total_seconds() }}
+        sequence:
+          - service: scene.turn_on
+            target:
+              entity_id: "{{ snapshot_scene }}"
+          - service: scene.delete
+            target:
+              entity_id: "{{ snapshot_scene }}"

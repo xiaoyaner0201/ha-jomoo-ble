@@ -101,6 +101,8 @@ async def main():
                 self.cb(None, bytearray(E7))
                 return
             state["writes"].append(bytes(data).hex())
+            if f.command == 0x19 and not (f.payload[0] & 0x08) and state.get("fail_lid_off"):
+                raise OSError("synthetic failed lid-option write")
             if f.command == 0x19:
                 state["e2"] = with_byte(state["e2"], 0, f.payload[0])
                 state["fa"] = with_byte(state["fa"], 0, f.payload[0])
@@ -331,6 +333,10 @@ async def main():
     print(
         "verified controls PASS: foot available without experimental opt-in, manual paths and controls gate"
     )
+
+    from blueprint_scenario import async_test_blueprint
+
+    await async_test_blueprint(hass, ROOT, sw, foot, state)
 
     # Mechanical + flush
     ob = next(e.entity_id for e in ents if e.unique_id.endswith("_open_lid"))
