@@ -52,6 +52,7 @@
 - **蓝牙连接**：HA 到马桶之间要有一条能主动连接的蓝牙链路，可以是本机蓝牙适配器，也可以是开了 `active: true` 的 [ESPHome 蓝牙代理](https://esphome.io/components/bluetooth_proxy/)。
   - 卫生间对蓝牙信号衰减很大，代理要放在马桶附近。实测隔墙约 -90 dBm 时基本连不上，放到旁边约 -68 dBm，不到 1 秒就能连上。
   - 注意防水和用电安全。
+  - 用 ESPHome 代理时，还要在 HA 里打开这台 ESPHome 设备的集成选项，把「蓝牙扫描模式」设为「主动」。新版 HA 默认是「自动」，大部分时间只被动扫描，马桶的名字（只放在扫描响应里）到不了 HA。这时集成会把它当成不支持的型号拒绝连接，重载后所有实体都会变成不可用。ESPHome 配置里写 `active: true` 管不到 HA 这一侧的设置。
 
 ## 先知道两件事
 
@@ -150,28 +151,57 @@ central，官方小程序不能同时连接。关闭选项、卸载集成或停�
 - 停水并持续到设定的延迟，就恢复；
 - 每一步最多重试 5 次，每次间隔 30 秒，直到 `guard_active` 属性变成目标值。
 
-**选信号要注意**：用来触发的必须是「正在出热水」，而不是「热水器通电」。下面是两个示例，实体名换成你自己的：
+**选信号要注意**：用来触发的必须是「正在用热水」，而不是「热水器通电」。接好以后先洗一次澡，看这个信号的历史记录确实变过、自动化的「上次触发」有时间，再放心用。
+
+**实测搭配（已更正）**：作者家是国行史密斯燃气热水器，通过社区集成 [Ai-Link A.O. Smith](https://github.com/mopocv/Ai-Link_A.O.Smith) 接入 HA。要用 v1.4.0 及以上，它会自己续期 App 的短效令牌。
+
+本文旧版推荐用它的「燃烧加热状态」，这是错的：这台机器上它连着好几天一直是「未加热」，真洗澡时风机约 3000 转、燃烧比例 44%，它也没变，守护一次都没触发。流量读数也不可靠，出现过没开水龙头、流量却不为零的情况。
+
+作者家现在用的触发条件是：**零冷水开着，或者风机转速大于 0**。零冷水循环和其他用热水的时候也会触发，后果只是自动翻盖暂停一会儿。实体名换成你自己的；两个来源都不可用时，模板保持原值，不会把「没数据」当成「停水」：
 
 ```yaml
 template:
   - binary_sensor:
-      # 用出水流量判断
-      - name: 正在出热水
-        state: "{{ states('sensor.water_heater_flow') | float(0) > 0 }}"
-        delay_off: "00:00:20"
-      # 或者用热水器的燃烧/加热状态判断
-      - name: 正在出热水（燃烧）
-        state: "{{ state_attr('water_heater.my_heater', 'heating') in [true, 1, '1'] }}"
-        delay_off: "00:00:20"
+      - name: 正在用热水
+        unique_id: hot_water_in_use
+        state: >-
+          {% set recirculation = states('switch.water_heater_recirculation') %}
+          {% set fan = states('sensor.water_heater_fan_speed') %}
+          {% if recirculation in ['unknown', 'unavailable'] and not is_number(fan) %}
+            {{ this.state == 'on' }}
+          {% else %}
+            {{ recirculation == 'on' or (fan | float(0)) > 0 }}
+          {% endif %}
 ```
 
-**实测搭配**：作者家是国行史密斯燃气热水器，通过社区集成 [Ai-Link A.O. Smith](https://github.com/mopocv/Ai-Link_A.O.Smith) 接入 HA。要用 v1.4.0 及以上，它会自己续期 App 的短效令牌。触发条件用它的「燃烧加热状态」：
+蓝图里的恢复延迟建议设成 **10 分钟**，免得擦身、穿衣时又开始翻盖（蓝图默认仍是 3 分钟）。热水器云端数据有时也会连着几分钟不更新。
+
+**HA 重启或改自动化之后的兜底恢复**：HA 重启、或者自动化被保存/重载时，正在计的「停水满 N 分钟」会作废。守护状态还在，但不会再有人去触发恢复。下面这个兜底自动化每 5 分钟、以及 HA 启动时检查一次，停水满同样的时长就恢复；不需要恢复时不会连马桶。实体名换成你自己的，延迟和蓝图保持一致：
 
 ```yaml
-state: "{{ is_state('sensor.<热水器>_ran_shao_jia_re_zhuang_tai', '加热中') }}"
+automation:
+  - alias: 淋浴守护兜底恢复
+    mode: single
+    triggers:
+      - trigger: time_pattern
+        minutes: "/5"
+      - trigger: homeassistant
+        event: start
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ is_state('binary_sensor.hot_water_in_use', 'off')
+             and (state_attr('switch.toilet_auto_cover', 'guard_active')
+                  or state_attr('switch.toilet_auto_cover', 'guard_pending'))
+             and now() - states.binary_sensor.hot_water_in_use.last_changed
+                 > timedelta(minutes=10) }}
+    actions:
+      - action: jomoo_ble.resume_auto_cover
+        target:
+          entity_id: switch.toilet_auto_cover
 ```
 
-这里建议用燃烧状态，别用流量：实测出现过没开水龙头、流量却不为零的读数。
+HA 重启后，信号的 `last_changed` 也会从头算，所以兜底最多会再多等 10 分钟。作者家的 HA 里跑的是同样的逻辑；用之前请在你自己的 HA 里验证。
 
 **守护规则**：
 - 暂停时，先记住当前自动翻盖的状态，只有原来是开着的才会去关。

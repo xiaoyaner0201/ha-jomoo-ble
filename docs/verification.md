@@ -87,10 +87,27 @@ Verified with read-back and with all other settings unchanged:
 
 ## Water-heater signal (same household)
 
-- The A.O. Smith gas heater is in HA through Ai-Link A.O. Smith v1.4.0. The burner-state
-  template drives the shipped blueprint, and the automation is live.
+- The A.O. Smith gas heater is in HA through Ai-Link A.O. Smith v1.4.0.
 - The app token lasts 30 minutes. It was renewed and persisted at two consecutive expiries,
   and the coordinator kept succeeding every 60 s.
+- Correction: the burner-state template recommended in 0.2.0 never fired. During the first
+  real shower its sensor stayed "not heating" (fan about 3000 rpm, 44% burner duty, outlet
+  42 °C), and the automation had never been triggered since it was created. The trigger
+  was changed to "zero-cold-water switch on, or fan speed above 0". Applied while
+  recirculation was running, the new signal turned on at once and triggered the
+  automation, and it went off when recirculation stopped. The restore delay is now
+  10 minutes. A full shower with the new trigger from start to finish has not been
+  recorded yet.
+- Saving the automation while hot water was already off dropped the running `for:`
+  timer, so the guard was never restored. A periodic fallback automation (see README)
+  then restored automatic lid opening by itself, and the guard cleared.
 
-Not yet exercised on hardware: the experimental switches and numbers, large flush, and
-a full shower (hot water on → guard active → off for 3 min → restored).
+## Bluetooth proxy scanning mode
+
+- After an HA reload, every entity became unavailable: the integration refused the toilet
+  as "Unsupported advertised model". HA showed the advertisement at -63 dBm, but its name
+  was the MAC address, because HA 2026.9 had left the ESPHome proxy in *Auto* scanning
+  mode (passive most of the time). After setting the ESPHome entry's scanning mode to
+  *Active*, the name `JOMOO_SMART_237369` arrived within a minute and Refresh succeeded.
+
+Not yet exercised on hardware: the experimental switches and numbers, and large flush.

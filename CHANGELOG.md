@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Docs: corrected the tested A.O. Smith hot-water signal. The burner-state sensor never
+  changed during a real shower; the working trigger is zero-cold-water on or fan speed
+  above 0, with a 10-minute restore delay.
+- Docs: added a fallback automation that restores the guard after an HA restart or
+  automation reload drops the blueprint's `for:` timer.
+- Docs: ESPHome Bluetooth proxies need HA's scanning mode set to Active, or the toilet
+  name never arrives and the device is refused after a reload.
+
 ## 0.2.0
 
 - Full decoders for status frames E2, FA, E9, EA and E7. Unknown bits are kept raw.
