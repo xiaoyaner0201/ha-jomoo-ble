@@ -56,6 +56,12 @@ To get there, Home Assistant first had to really understand this toilet — henc
   `active: true`. Bathrooms attenuate Bluetooth heavily; put the proxy close to the
   toilet (in testing, -90 dBm through a wall was unusable, -68 dBm beside it connected
   in under a second). Mind water and mains safety.
+- With an ESPHome proxy, also set **Bluetooth scanning mode** to **Active** in the
+  ESPHome device's integration options in Home Assistant. Recent HA versions default to
+  *Auto*, which scans passively most of the time, so the toilet's name (sent only in
+  scan responses) never reaches HA. The integration then refuses the device as an
+  unsupported model and every entity becomes unavailable after a reload. `active: true`
+  in the ESPHome YAML does not override this HA-side setting.
 
 ## Two things to know first
 
@@ -126,33 +132,81 @@ switch and a restore delay (default 3 minutes). Hot water on → suspend; hot wa
 the delay → resume. Each step retries up to 5 times, 30 s apart, until the
 `guard_active` attribute shows the target.
 
-Use a signal that means hot water is actually flowing, not just that the heater is
-powered. Examples (adapt the entity ids):
+Use a signal that means hot water is in use, not just that the heater is powered, and
+check that it really changes during a shower: look at its history and make sure the
+automation's *last triggered* is set before relying on it.
+
+### Tested A.O. Smith signal (corrected)
+
+The maintainer's China-market A.O. Smith gas water heater is added through the community
+[Ai-Link A.O. Smith](https://github.com/mopocv/Ai-Link_A.O.Smith) integration
+(v1.4.0 or newer, which renews its short-lived app token by itself).
+
+An earlier version of this README recommended its *burner heating* (`heating`) sensor.
+That was wrong for this unit: the sensor stayed "not heating" for days, including during
+a real shower with the fan at about 3000 rpm and 44% burner duty, so the guard never
+triggered. The flow-rate reading is not reliable either: it was once non-zero with no
+tap open.
+
+The working trigger in that home is **zero-cold-water (recirculation) switch on, or fan
+speed above 0**. It also fires on recirculation and other hot-water use, which only
+pauses the lid opening for a while. Replace the placeholder entity ids with your own.
+When both sources are unavailable, the template keeps its previous state instead of
+reading missing data as "hot water off":
 
 ```yaml
 template:
   - binary_sensor:
-      # From a flow-rate sensor
-      - name: Hot water flowing
-        state: "{{ states('sensor.water_heater_flow') | float(0) > 0 }}"
-        delay_off: "00:00:20"
-      # Or from a heater entity that reports burner activity
-      - name: Hot water flowing (burner)
-        state: "{{ state_attr('water_heater.my_heater', 'heating') in [true, 1, '1'] }}"
-        delay_off: "00:00:20"
+      - name: Hot water in use
+        unique_id: hot_water_in_use
+        state: >-
+          {% set recirculation = states('switch.water_heater_recirculation') %}
+          {% set fan = states('sensor.water_heater_fan_speed') %}
+          {% if recirculation in ['unknown', 'unavailable'] and not is_number(fan) %}
+            {{ this.state == 'on' }}
+          {% else %}
+            {{ recirculation == 'on' or (fan | float(0)) > 0 }}
+          {% endif %}
 ```
 
-Tested pairing: the maintainer's China-market A.O. Smith gas water heater, added through
-the community [Ai-Link A.O. Smith](https://github.com/mopocv/Ai-Link_A.O.Smith)
-integration (v1.4.0 or newer, which renews its short-lived app token by itself). Its
-*burner heating* sensor (`heating`) is the trigger:
+Use a **10-minute** restore delay in the blueprint, so the lid does not start opening
+again while you dry off (the blueprint default stays 3 minutes). The cloud data can also
+pause for several minutes at a time.
+
+### Restore after a restart or automation reload
+
+Home Assistant drops a running `for:` timer when it restarts or when the automation is
+saved or reloaded. The guard state survives, but nothing then schedules the restore.
+This fallback checks every 5 minutes and at HA start, and resumes once the signal has
+been off for the same delay. It does not connect to the toilet unless it resumes.
+Replace the entity ids and keep the delay in sync with the blueprint:
 
 ```yaml
-state: "{{ is_state('sensor.<heater>_ran_shao_jia_re_zhuang_tai', '加热中') }}"
+automation:
+  - alias: Toilet shower guard restore fallback
+    mode: single
+    triggers:
+      - trigger: time_pattern
+        minutes: "/5"
+      - trigger: homeassistant
+        event: start
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ is_state('binary_sensor.hot_water_in_use', 'off')
+             and (state_attr('switch.toilet_auto_cover', 'guard_active')
+                  or state_attr('switch.toilet_auto_cover', 'guard_pending'))
+             and now() - states.binary_sensor.hot_water_in_use.last_changed
+                 > timedelta(minutes=10) }}
+    actions:
+      - action: jomoo_ble.resume_auto_cover
+        target:
+          entity_id: switch.toilet_auto_cover
 ```
 
-Prefer burner state over flow rate there: the flow reading was non-zero once while no
-tap was open.
+After an HA restart the signal's `last_changed` restarts too, so the fallback can wait
+up to another 10 minutes. The same logic runs in the maintainer's HA; validate these
+examples in your own.
 
 Guard semantics: suspend remembers the current value and only writes *off* if it was on;
 resume only writes *on* if it was on before, and never writes *off*. Changing the switch
