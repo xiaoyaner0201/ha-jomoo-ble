@@ -62,6 +62,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     if stale_id is not None and registry.async_get(stale_id).config_entry_id == entry.entry_id:
         registry.async_remove(stale_id)
+    foot_id = registry.async_get_entity_id("switch", DOMAIN, f"{entry.data['address']}_foot_sensor")
+    if foot_id is not None:
+        foot = registry.async_get(foot_id)
+        # Upgrade the old integration default, never a user's explicit choice or ID.
+        if (
+            foot.config_entry_id == entry.entry_id
+            and foot.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+        ):
+            registry.async_update_entity(foot_id, disabled_by=None)
     coordinator = JomooCoordinator(hass, entry)
     # No default startup BLE connection; persistent acquisition is explicit opt-in.
     entry.runtime_data = coordinator

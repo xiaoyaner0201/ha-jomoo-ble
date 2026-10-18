@@ -71,6 +71,10 @@ class Device:
             p5 = parse_frame(self.fa).payload[5]
             p5 = p5 | 0x20 if parsed.payload[1] == 0x40 else p5 & ~0x20
             self.fa = with_byte(self.fa, 5, p5)
+        elif parsed.command == 0x1F and parsed.payload[0] == 0x24:
+            p7 = parse_frame(self.fa).payload[7]
+            p7 = p7 | 0x20 if parsed.payload[1] == 0x01 else p7 & ~0x20
+            self.fa = with_byte(self.fa, 7, p7)
         if self.corrupt_on_write:
             self.e2 = with_byte(self.e2, 1, 0x55)  # seat temperature 5 instead of 2
             self.fa = with_byte(self.fa, 1, 0x55)
@@ -170,6 +174,31 @@ class SessionTests(unittest.TestCase):
         device = Device(fa=with_byte(FA, 5, 0x12))  # UV off
         snap = run(manager(device).command(SetOption(Option.UV_DISINFECTION, True)))
         self.assertTrue(snap.extended.uv_disinfection)
+
+    def test_foot_sensor_round_trip_and_noop(self):
+        device = Device()
+        session = manager(device)
+        for enabled, p7, value in ((False, 0x13, 0x02), (True, 0x33, 0x01)):
+            with self.subTest(enabled=enabled):
+                snap = run(session.command(SetOption(Option.FOOT_SENSOR, enabled)))
+                self.assertEqual(snap.extended.foot_sensor, enabled)
+                self.assertEqual(snap.extended.raw[7], p7)
+                self.assertEqual(parse_frame(device.writes[-1]).payload, bytes((0x24, value)))
+        self.assertEqual(len(device.writes), 2)
+        run(session.command(SetOption(Option.FOOT_SENSOR, True)))
+        self.assertEqual(len(device.writes), 2)
+
+    def test_foot_sensor_keeps_write_safety_guarantees(self):
+        for device, error in (
+            (Device(write_error=True), SessionError),
+            (Device(ignore_writes=True), VerificationError),
+            (Device(corrupt_on_write=True), VerificationError),
+        ):
+            with self.subTest(error=error):
+                with self.assertRaises(error):
+                    run(manager(device).command(SetOption(Option.FOOT_SENSOR, False)))
+                self.assertEqual(len(device.writes), 1)
+                self.assertEqual(device.active, 0)
 
     def test_refuse_when_busy_seated_or_moving(self):
         cases = {

@@ -33,8 +33,8 @@
         "description": "Connections beep and only one central is allowed. Opt-in live status holds Bluetooth continuously, blocking the official app until disabled/unloaded; initial connection beeps. In stream mode polling is ignored and disconnect requires manual Refresh status to retry.",
         "data": {
           "enable_status_stream": "Enable persistent live status (single central; connection beeps)",
-          "enable_controls": "Enable verified controls (lid, seat ring, small flush, automatic lid opening)",
-          "enable_experimental": "Enable experimental controls (not yet verified on hardware)",
+          "enable_controls": "Enable verified controls (lid, seat ring, small flush, automatic lid opening, foot sensor)",
+          "enable_experimental": "Enable experimental controls (temperature, pressure, nozzle, fan, wide wash, auto flush, auto night light, UV, close lid before flush, auto small flush, ambient light, large flush)",
           "poll_interval": "Automatic refresh interval in seconds (0 = off, otherwise 300–86400)"
         }
       }
@@ -195,7 +195,7 @@
         "name": "Automatic small flush (experimental)"
       },
       "foot_sensor": {
-        "name": "Foot sensor (experimental)"
+        "name": "Foot sensor"
       },
       "ambient_light": {
         "name": "Ambient light (experimental)"

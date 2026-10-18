@@ -104,6 +104,10 @@ async def main():
             if f.command == 0x19:
                 state["e2"] = with_byte(state["e2"], 0, f.payload[0])
                 state["fa"] = with_byte(state["fa"], 0, f.payload[0])
+            elif f.command == 0x1F and f.payload[0] == 0x24:
+                p7 = proto.parse_frame(state["fa"]).payload[7]
+                p7 = p7 | 0x20 if f.payload[1] == 0x01 else p7 & ~0x20
+                state["fa"] = with_byte(state["fa"], 7, p7)
             elif f.command == 0x11:
                 state["ea"] = with_byte(state["ea"], 0, 0x09)
             elif f.command == 0x10:
@@ -258,6 +262,26 @@ async def main():
         "legacy migration PASS: active/pending warning once, store/entity removed, no BLE; I/O failure tolerated"
     )
 
+    # Foot promotion preserves entity ID and user disables; upgrades only the old default.
+    foot_entry = next(e for e in ents if e.unique_id.endswith("_foot_sensor"))
+    foot = foot_entry.entity_id
+    assert foot_entry.disabled_by is None
+    assert foot_entry.entity_category.value == "config"
+    assert hass.states.get(foot).state == "unavailable"  # controls gate, not hidden
+    for disabler in (er.RegistryEntryDisabler.USER, er.RegistryEntryDisabler.INTEGRATION):
+        registry.async_update_entity(foot, disabled_by=disabler)
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+        updated = registry.async_get(foot)
+        assert updated.unique_id == foot_entry.unique_id
+        assert updated.disabled_by == (
+            disabler if disabler is er.RegistryEntryDisabler.USER else None
+        )
+    assert not state["writes"]
+    print(
+        "foot registry migration PASS: enabled default, same ID, user disable kept, integration disable cleared"
+    )
+
     # Enable controls via options flow
     r = await hass.config_entries.options.async_init(entry.entry_id)
     r = await hass.config_entries.options.async_configure(
@@ -276,6 +300,37 @@ async def main():
         await hass.services.async_call("switch", service, {"entity_id": sw}, blocking=True)
         assert hass.states.get(sw).state == expected
         assert not any(k.startswith("guard_") for k in hass.states.get(sw).attributes)
+
+    # Real entities route both switches through the ordinary command path, not policy.
+    switch_mod = importlib.import_module("custom_components.jomoo_ble.switch")
+    coordinator = entry.runtime_data
+    assert not coordinator.experimental_enabled
+    for key in ("auto_cover", "foot_sensor"):
+        entity = switch_mod.SettingSwitch(coordinator, key)
+        assert entity.entity_registry_enabled_default and entity.available
+        with patch.object(coordinator, "async_command", AsyncMock()) as command:
+            await entity.async_turn_off()
+            await entity.async_turn_on()
+            expected = [
+                client_mod.SetSettings({"auto_cover": v})
+                if key == "auto_cover"
+                else client_mod.SetOption(proto.Option.FOOT_SENSOR, v)
+                for v in (False, True)
+            ]
+            assert [c.args[0] for c in command.await_args_list] == expected
+            assert all(c.kwargs == {"experimental": False} for c in command.await_args_list)
+        coordinator.controls_enabled = False
+        assert not entity.available
+        with case.assertRaises(HomeAssistantError):
+            await entity.async_turn_off()
+        coordinator.controls_enabled = True
+    assert hass.states.get(foot).state != "unavailable"
+    for service, expected in (("turn_off", "off"), ("turn_on", "on")):
+        await hass.services.async_call("switch", service, {"entity_id": foot}, blocking=True)
+        assert hass.states.get(foot).state == expected
+    print(
+        "verified controls PASS: foot available without experimental opt-in, manual paths and controls gate"
+    )
 
     # Mechanical + flush
     ob = next(e.entity_id for e in ents if e.unique_id.endswith("_open_lid"))
