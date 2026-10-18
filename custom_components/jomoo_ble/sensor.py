@@ -72,6 +72,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
     coordinator = entry.runtime_data
     entities: list[SensorEntity] = [SpecSensor(coordinator, k, v) for k, v in SENSORS.items()]
     entities.append(LastRefreshSensor(coordinator, "last_refresh"))
+    if coordinator.stream_enabled:
+        entities.append(LastReceivedSensor(coordinator, "last_status_received"))
     entities += [RawSensor(coordinator, key, command) for key, command in RAW.items()]
     async_add_entities(entities)
 
@@ -99,6 +101,30 @@ class LastRefreshSensor(JomooEntity, SensorEntity):
     @property
     def native_value(self):
         return self.coordinator.last_refresh
+
+
+class LastReceivedSensor(JomooEntity, SensorEntity):
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def native_value(self):
+        return self.coordinator.last_received
+
+    @property
+    def extra_state_attributes(self):
+        snapshot = self.snapshot
+        return {
+            "live": self.coordinator.session.stream_connected,
+            "frame_received_at": {
+                f"0x{command:02X}": value.isoformat()
+                for command, value in (snapshot.received_at.items() if snapshot else [])
+            },
+        }
 
 
 class RawSensor(JomooEntity, SensorEntity):

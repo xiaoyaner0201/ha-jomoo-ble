@@ -171,6 +171,15 @@ Not implemented on purpose:
   wash opcodes;
 - foam, firmware update, factory reset.
 
+## Optional persistent acquisition
+
+A read-only 90-second observation on the exact ZS800J model showed passive FA flush
+on/off, EA movement and later FA changes after the initial query, without polling.
+This establishes that notifications can carry changes; it does not establish the meaning
+of FA payload[5] bit0. That bit remains Unknown, not refill/water-level/refill-complete.
+The opt-in implementation and its separate synthetic/live acceptance boundaries are
+documented in [status-stream.md](status-stream.md).
+
 ## Known gaps
 
 - There is no transaction id. A query clears the collected frames and waits for a fresh

@@ -1,9 +1,9 @@
-"""Serialized, short-lived BLE sessions, independent of Home Assistant.
+"""Serialized BLE sessions with optional shared persistent status notifications.
 
-Every connection makes the toilet beep and only one central may be connected, so
-each operation is connect -> fresh query -> (write -> verify) -> disconnect under a
-single lock. Actuator writes are never retried automatically. The connector is
-injected; tests never touch a radio.
+By default each operation connects, queries, verifies and disconnects. Explicit
+stream opt-in retains that same client and fans notifications into independent
+fresh operation windows and a display-only snapshot. One lock owns all operations
+and release. Actuator writes are never retried; tests inject the physical client.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
+from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Awaitable, Callable, Mapping, Optional, Protocol, Union
 
@@ -78,9 +79,11 @@ class VerificationError(SessionError):
 class Snapshot:
     frames: Mapping[int, Frame]
     warning: Optional[str] = None
+    received_at: Mapping[int, datetime] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "frames", MappingProxyType(dict(self.frames)))
+        object.__setattr__(self, "received_at", MappingProxyType(dict(self.received_at)))
 
     def _decode(self, command: int, decoder):
         frame = self.frames.get(command)
@@ -152,6 +155,7 @@ FLUSH_UNCONFIRMED = "flush_sent_unconfirmed"
 @dataclass
 class _Window:
     frames: dict = field(default_factory=dict)
+    received_at: dict = field(default_factory=dict)
     event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -178,6 +182,75 @@ class SessionManager:
         self.settle_time = settle_time
         self.poll_gap = poll_gap
         self.resend_interval = resend_interval
+        self._stream = False
+        self._changed: Optional[Callable[[], None]] = None
+        self._client: Optional[Client] = None
+        self._connection_lost = False
+        self._establish_losses: Optional[list[Client]] = None
+        self._window: Optional[_Window] = None
+        self._decoder = FrameDecoder()
+        self.stream_snapshot: Optional[Snapshot] = None
+        self.last_received: Optional[datetime] = None
+        self._refresh_task: Optional[asyncio.Task] = None
+
+    def enable_stream(self, changed: Callable[[], None]) -> None:
+        """Opt in before use. No connection until the explicit initial/manual poll."""
+        self._stream = True
+        self._changed = changed
+
+    @property
+    def stream_connected(self) -> bool:
+        return bool(
+            self._stream
+            and not self._closed
+            and not self._blocked
+            and not self._connection_lost
+            and self._client is not None
+            and self._client.is_connected
+            and self.stream_snapshot is not None
+        )
+
+    def connection_lost(self, client: Client) -> None:
+        """Called by the transport on the event loop; never reconnect here."""
+        if client is not self._client:
+            if self._establish_losses is not None:
+                # The returning client is not known yet. Match by identity on adopt;
+                # late callbacks from old/retried clients must not poison this attempt.
+                self._establish_losses.append(client)
+            return
+        self._connection_lost = True
+        self.stream_snapshot = None
+        self._decoder = FrameDecoder()
+        if self._changed is not None:
+            self._changed()
+
+    def _notification(self, client: Client, _sender: object, data: bytearray) -> None:
+        if (
+            client is not self._client
+            or self._connection_lost
+            or self._blocked
+            or not client.is_connected
+        ):
+            return
+        for frame in self._decoder.feed(bytes(data)):
+            try:
+                validate_status(frame)
+            except ProtocolError:
+                continue
+            received = datetime.now(timezone.utc)
+            self.last_received = received
+            if self._window is not None:
+                self._window.frames[frame.command] = frame
+                self._window.received_at[frame.command] = received
+                self._window.event.set()
+            if self._stream and not self._closed and self.stream_snapshot is not None:
+                frames = dict(self.stream_snapshot.frames)
+                times = dict(self.stream_snapshot.received_at)
+                frames[frame.command] = frame
+                times[frame.command] = received
+                self.stream_snapshot = Snapshot(frames, received_at=times)
+            if self._stream and not self._closed and self._changed is not None:
+                self._changed()
 
     @property
     def blocked(self) -> bool:
@@ -186,10 +259,27 @@ class SessionManager:
     async def close(self) -> None:
         self._closed = True
         async with self._lock:
-            pass
+            try:
+                if self._client is not None:
+                    await self._release()
+            finally:
+                self._changed = None
+        if self._refresh_task is not None:
+            await asyncio.gather(self._refresh_task, return_exceptions=True)
+            self._refresh_task = None
 
     async def poll(self) -> Snapshot:
-        return await self._run(None, None)
+        if not self._stream:
+            return await self._run(None, None)
+        # Simultaneous explicit requests share even a failed connection attempt.
+        if self._refresh_task is None or self._refresh_task.done():
+            self._refresh_task = asyncio.create_task(self._run(None, None))
+            # A cancelled waiter does not cancel a shared attempt; consume an eventual
+            # error even when every waiter went away. close() still drains the task.
+            self._refresh_task.add_done_callback(
+                lambda task: task.exception() if not task.cancelled() else None
+            )
+        return await asyncio.shield(self._refresh_task)
 
     async def command(self, command: Command, prepare: Optional[Prepare] = None) -> Snapshot:
         return await self._run(command, prepare)
@@ -200,52 +290,130 @@ class SessionManager:
         async with self._lock:
             if self._closed or self._blocked:
                 raise SessionError("Session closed or disconnect uncertain; reload required")
-            client = await self._connect()
-            window = _Window()
-            decoder = FrameDecoder()
-
-            def notification(_sender: object, data: bytearray) -> None:
-                for frame in decoder.feed(bytes(data)):
+            if self._stream and command is not None and not self.stream_connected:
+                raise SessionError("Live connection unavailable; refresh manually before control")
+            if self._client is not None and not self._client.is_connected:
+                self.connection_lost(self._client)
+                self._client = None
+            elif self._client is not None and self._connection_lost:
+                # A disconnect callback is authoritative even if the backend's
+                # property lags. Confirm release before establishing another socket.
+                await self._release()
+            if self._client is None:
+                # Establishment can finish after cancellation. Retain ownership until
+                # its bounded result is known, then physically release before returning.
+                losses: list[Client] = []
+                self._establish_losses = losses
+                try:
+                    connecting = asyncio.ensure_future(self._connect())
                     try:
-                        validate_status(frame)
-                    except ProtocolError:
-                        continue
-                    window.frames[frame.command] = frame
-                    window.event.set()
-
+                        self._client = await asyncio.shield(connecting)
+                    except asyncio.CancelledError:
+                        try:
+                            self._client = await connecting
+                        except Exception:
+                            raise asyncio.CancelledError from None
+                        await self._release()
+                        raise
+                    self._connection_lost = any(client is self._client for client in losses)
+                finally:
+                    # Failure/cancellation must not retain identities for a later attempt.
+                    self._establish_losses = None
+                self._decoder = FrameDecoder()
+                new_connection = True
+            else:
+                new_connection = False
+            client = self._client
+            window = _Window()
+            self._window = window
+            keep = False
             try:
-                await asyncio.wait_for(client.start_notify(CHARACTERISTIC, notification), 10)
+                if self._closed:
+                    raise SessionError("Session closed during connection")
+                if self._connection_lost:
+                    raise SessionError("Connection lost during establishment")
+                if new_connection:
+                    await asyncio.wait_for(
+                        client.start_notify(
+                            CHARACTERISTIC,
+                            lambda sender, data: self._notification(client, sender, data),
+                        ),
+                        10,
+                    )
                 before = await self._query(client, window, include_filter=True)
-                if command is None:
-                    return before
-                if prepare is not None and not await prepare(before):
-                    return before
-                return await self._execute(client, window, command, before)
+                if self._closed:
+                    raise SessionError("Session closed during status query")
+                if self._stream:
+                    prior = self.stream_snapshot
+                    self.stream_snapshot = Snapshot(
+                        {**(prior.frames if prior else {}), **before.frames},
+                        received_at={**(prior.received_at if prior else {}), **before.received_at},
+                    )
+                    if self._changed is not None:
+                        self._changed()
+                if command is None or (prepare is not None and not await prepare(before)):
+                    result = before
+                else:
+                    if self._closed:
+                        raise SessionError("Session closed before control")
+                    result = await self._execute(client, window, command, before)
+                keep = self._stream and client.is_connected and not self._closed
+                return result
+            except (CommandRefused, VerificationError):
+                keep = self._stream and client.is_connected and not self._closed
+                raise
             finally:
-                await self._disconnect(client)
+                self._window = None
+                if not keep:
+                    await self._release()
+
+    async def _release(self) -> None:
+        client = self._client
+        if client is None:
+            return
+        self.connection_lost(client)
+        # Detach before awaiting so queued notifications cannot revive stale state.
+        self._client = None
+        try:
+            await self._disconnect(client)
+        except BaseException:
+            self._client = client  # retain ownership if physical release is uncertain
+            self.connection_lost(client)
+            raise
 
     async def _query(
         self, client: Client, window: _Window, include_filter: bool = False
     ) -> Snapshot:
         window.frames.clear()
+        window.received_at.clear()
         window.event.clear()
-        await client.write_gatt_char(CHARACTERISTIC, state_query(), response=False)
+        await asyncio.wait_for(
+            client.write_gatt_char(CHARACTERISTIC, state_query(), response=False), 10
+        )
         if include_filter:
-            await client.write_gatt_char(CHARACTERISTIC, filter_query(), response=False)
+            await asyncio.wait_for(
+                client.write_gatt_char(CHARACTERISTIC, filter_query(), response=False), 10
+            )
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.response_timeout
         resend_at = loop.time() + self.resend_interval
-        while not all(c in window.frames for c in REQUIRED):
+        required = REQUIRED + (
+            (FILTER,) if self._stream and include_filter and self.stream_snapshot is None else ()
+        )
+        while not all(c in window.frames for c in required):
             now = loop.time()
             remaining = deadline - now
             if remaining <= 0:
-                missing = [f"0x{c:02X}" for c in REQUIRED if c not in window.frames]
+                missing = [f"0x{c:02X}" for c in required if c not in window.frames]
                 raise SessionError("Fresh status incomplete: missing " + ", ".join(missing))
             if now >= resend_at:
                 # The toilet can drop a query that arrives while it is applying a
                 # write; asking again is read-only and safe.
-                await client.write_gatt_char(CHARACTERISTIC, state_query(), response=False)
-                resend_at = now + self.resend_interval
+                await asyncio.wait_for(
+                    client.write_gatt_char(CHARACTERISTIC, state_query(), response=False),
+                    min(10, remaining),
+                )
+                resend_at = loop.time() + self.resend_interval
             try:
                 await asyncio.wait_for(window.event.wait(), min(remaining, resend_at - now))
             except asyncio.TimeoutError:
@@ -253,8 +421,10 @@ class SessionManager:
             window.event.clear()
         # E7 and late duplicates may trail the required burst.
         await asyncio.sleep(self.settle_time)
-        snapshot = Snapshot(dict(window.frames))
+        snapshot = Snapshot(window.frames, received_at=window.received_at)
         _full(snapshot)
+        if not client.is_connected or self._connection_lost:
+            raise SessionError("Connection lost during status query")
         return snapshot
 
     def _plan(self, command: Command, before: Snapshot) -> tuple[Optional[bytes], frozenset]:
@@ -374,7 +544,7 @@ class SessionManager:
             if _full(last)[1].flushing:
                 return last
             await asyncio.sleep(self.poll_gap)
-        return Snapshot(dict(last.frames), warning=FLUSH_UNCONFIRMED)
+        return Snapshot(last.frames, warning=FLUSH_UNCONFIRMED, received_at=last.received_at)
 
     async def _disconnect(self, client: Client) -> None:
         async def disconnect() -> None:

@@ -7,6 +7,7 @@ MODEL = "ZS800J"
 MODEL_CODE = "237369"
 
 CONF_NAME_PREFIX = "name_prefix"
+CONF_ENABLE_STATUS_STREAM = "enable_status_stream"
 CONF_ENABLE_CONTROLS = "enable_controls"
 CONF_ENABLE_EXPERIMENTAL = "enable_experimental"
 CONF_POLL_INTERVAL = "poll_interval"

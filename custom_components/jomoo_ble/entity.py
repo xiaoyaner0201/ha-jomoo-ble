@@ -28,7 +28,9 @@ class JomooEntity(CoordinatorEntity[JomooCoordinator]):
     @property
     def available(self) -> bool:
         # Data is fetched on demand; an unknown state is shown as unknown, not unavailable.
-        return not self.coordinator.session.blocked
+        return not self.coordinator.session.blocked and (
+            not self.coordinator.stream_enabled or self.coordinator.session.stream_connected
+        )
 
     @property
     def snapshot(self):

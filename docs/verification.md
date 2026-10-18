@@ -5,7 +5,8 @@ Assistant runtime, and physical hardware.
 
 ## Offline (CI)
 
-- `python -m unittest discover -s tests -v` runs 38 tests on Python 3.13 and 3.14.
+- `python -m unittest discover -s tests -v` covers protocol, sessions, guard and
+  synthetic stream acquisition/lifecycle tests, including connection-handoff loss.
   - Every decoder is checked against the hardware fixtures.
   - All seven verified function-frame vectors are reproduced byte for byte.
   - A single-field change only touches its own bits.
@@ -28,7 +29,7 @@ Assistant runtime, and physical hardware.
 `tests/ha_smoke/smoke_in_ha_container.py` checks the following:
 
 - The manifest and Bluetooth matcher load, and en / zh-Hans translations resolve
-  (52 entity strings each).
+  (54 entity strings each).
 - A config flow with a bad MAC returns the form error; a valid one creates the entry
   with a single connection.
 - Setup makes no extra connection. Entities start as *unknown*, not unavailable.
@@ -43,6 +44,48 @@ Assistant runtime, and physical hardware.
 - The open-lid and small-flush buttons are confirmed by read-back.
 - The `jomoo_ble.refresh` service connects once.
 - Diagnostics redact the address, and unload succeeds.
+
+## Opt-in stream (offline and HA container)
+
+See [status-stream.md](status-stream.md) for acquisition semantics and limitations.
+The earlier 90-second passive observation is protocol evidence; implementation-level
+hardware acceptance is recorded separately below. FA payload[5] bit0 remains unknown;
+there is no refill sensor or pump policy.
+
+The extended smoke test uses the real HA 2026.9.1 coordinator, entities, services, options
+and registry, faking only BLE discovery/establishment and device traffic. It also fixes
+old smoke entity lookups that matched `last_refresh` instead of the Refresh button and
+`auto_small_flush` instead of the small-flush button. Assertions now target actual buttons.
+Stream tests assert startup/no polling, off/on/off, timestamps, one physical client,
+guard preservation, loss/unavailability, coalesced recovery, failed startup without a
+scheduled retry, option release, stable IDs, entry restart with retained options, unload and HA stop.
+A second `--uncertainty` run verifies failed physical release retains ownership,
+marks HA FAILED_UNLOAD, blocks reload/control, and exposes the diagnostic.
+A third `--handoff` run checks transport loss before connection adoption through the
+real HA adapter, coordinator and entities, including release and manual recovery.
+The stale disconnect latch across connection handoff was fixed in `99d9692`.
+These are synthetic assertions, not real proxy or toilet results.
+
+## Opt-in stream hardware acceptance (HA 2026.9.1, ESPHome Bluetooth proxy)
+
+- `enable_status_stream` was explicitly enabled in a real HA 2026.9.1 installation
+  through an ESPHome Bluetooth proxy. Flush start and end reached HA in real time via
+  passive notifications, without periodic queries.
+- All 5 end-to-end hardware scenarios passed, including stream re-establishment after
+  HA restarted during an automation pause. A separately maintained HA-native refill
+  automation, not included in this repository, acted about 0.5 seconds after flushing
+  ended. This validates an external consumer of `flushing`, not a refill-complete bit.
+- After the final installation, a single connection remained up for about 10.5 hours
+  with no disconnects. All 9 daily flushes delivered `flushing` on → off; entities such
+  as Flushing and Seated never became unavailable during that observation window.
+- These results do not establish long-term stability or hardware fault-injection
+  coverage for every disconnect, phone handover, proxy failure or concurrent command /
+  guard path. Long-term observation continues.
+- Existing limits remain: one central (the official mini program cannot connect while
+  HA holds Bluetooth), a beep per physical connection, no heartbeat or silence-based
+  disconnect detection, and unknown FA payload[5] bit0 with no refill entity. Failed
+  unload requires manual Bluetooth-release checks and an HA restart; reload alone
+  is not a recovery guarantee.
 
 ## Hardware (one ZS800J, ESPHome proxy beside the toilet)
 

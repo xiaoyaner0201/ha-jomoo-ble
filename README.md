@@ -66,12 +66,12 @@ To get there, Home Assistant first had to really understand this toilet — henc
 ## Two things to know first
 
 1. **Every connection makes the toilet beep.** The integration therefore never polls by
-   default. It connects only when you press *Refresh status*, call `jomoo_ble.refresh`,
-   or run a command, and disconnects immediately. You can opt in to slow polling
-   (300 s – 24 h) in the options.
-2. **Only one Bluetooth central at a time.** While Home Assistant is connected (a few
-   seconds), the official mini program cannot connect, and vice versa. Close the mini
-   program before setup.
+   default. By default, it connects only when you press *Refresh status*, call
+   `jomoo_ble.refresh`, or run a command, and disconnects immediately. You can opt in to
+   slow polling (300 s – 24 h) or persistent live status in the options.
+2. **Only one Bluetooth central at a time.** While Home Assistant is connected, the
+   official mini program cannot connect, and vice versa. With live status enabled, HA
+   holds that connection continuously. Close the mini program before setup.
 
 ## Install
 
@@ -93,6 +93,44 @@ example. Setup performs one read-only query (one beep).
 | Enable verified controls | off | Lid, seat ring, small flush, automatic lid opening, shower guard |
 | Enable experimental controls | off | Everything marked *Experimental* below |
 | Automatic refresh interval | 0 (off) | 0, or 300 – 86400 seconds |
+| Persistent live status (`enable_status_stream`) | off | Hold one shared BLE connection; ignore polling while enabled |
+
+### Opt-in live status (hardware-accepted, off by default)
+
+Live status remains off by default and must be explicitly enabled in the integration
+options. Enable it only if you accept continuous single-central
+ownership: the initial connection beeps and the official app cannot connect until HA
+releases Bluetooth. Initial validated E2/EA/E9/FA/E7 queries seed the snapshot; passive
+notifications then update existing entities, including Flushing. This is not a refill
+sensor: FA payload[5] bit0 is still unknown.
+
+Stream, refresh, commands and shower guard share the same physical connection and
+operation lock. Controls still require a new full query window, preserve other settings,
+write once and verify by read-back; stream caches never supply control settings.
+No periodic query/reconnect or automatic recovery is scheduled. After loss, state is
+unavailable; press the existing Refresh status button (or call `jomoo_ble.refresh`) for
+one coalesced recovery attempt. Underlying bounded establish retries are unchanged.
+Disabling the option, unloading, or stopping HA releases the connection; uncertain
+release blocks control and is not reported as success.
+
+Only when opted in, Live status connection and Last status received diagnostic entities
+are added. Receive timestamps advance only on valid packets, with per-frame timestamps;
+Last refresh still means an explicit complete query. Silence is not a new measurement,
+and a connected backend without heartbeats is not proof that every field is current.
+See [acquisition semantics and verification boundaries](docs/status-stream.md).
+Hardware acceptance used HA 2026.9.1 through an ESPHome Bluetooth proxy: flush start
+and end reached HA in real time through passive notifications, without periodic queries.
+All 5 end-to-end hardware scenarios passed, including stream re-establishment after an
+HA restart during an automation pause. After the final installation, one connection
+stayed up for about 10.5 hours with no disconnects; all 9 daily flushes delivered
+`flushing` on → off, and entities such as Flushing and Seated never became unavailable.
+A separately maintained HA-native refill automation (not included in this repository)
+acted about 0.5 seconds after flushing ended. This is not refill-complete detection or
+a long-term stability guarantee; long-term observation continues.
+
+If unloading fails, manually check Bluetooth release and restart HA: HA 2026.9.1 marks
+the entry FAILED_UNLOAD and refuses a reload. Do not assume the phone can reconnect
+until release is confirmed.
 
 ## Entities
 
@@ -226,7 +264,8 @@ guard state survives restarts.
   seen within about 6 seconds.
 - Writes are **never retried automatically**: a failed write may still have reached the
   toilet. No optimistic state is published.
-- If a disconnect cannot be confirmed, the integration stops connecting until reloaded.
+- If a disconnect cannot be confirmed, the integration stops connecting. A failed unload
+  requires manual Bluetooth-release checks and an HA restart; reload is not a guarantee.
 - Washing, drying, nozzle cleaning, firmware update and factory reset are not
   implemented.
 
@@ -241,6 +280,14 @@ protection.
 - Experimental controls are app-derived and unverified on hardware.
 
 ## Development
+
+To repeat the isolated HA lifecycle checks, run the official 2026.9.1 image with
+`--network none --memory 2g --cpus 2 --rm`, mount this checkout read-only at `/repo`,
+and execute `python3 /repo/tests/ha_smoke/smoke_in_ha_container.py /repo`.
+Repeat with `--uncertainty` after `/repo` to test conservative failed-unload behavior,
+then with `--handoff` to exercise transport loss before connection adoption through
+real HA adapter, coordinator and entities (including release and manual recovery).
+Do not mount a production config or Bluetooth hardware.
 
 ```sh
 python -m unittest discover -s tests -v   # protocol + synthetic BLE + shower guard

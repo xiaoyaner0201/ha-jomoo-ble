@@ -1,7 +1,25 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
+- Added opt-in persistent live status (`enable_status_stream`), disabled by default.
+  One shared BLE connection receives passive notifications for existing entities,
+  including flushing, without periodic queries. Refresh, controls and shower guard
+  share the connection and operation lock; control writes still require fresh reads,
+  a single write, read-back and unchanged-setting checks.
+- Added live-connection and last-received diagnostics, per-frame receive timestamps,
+  conservative loss/unavailability handling, explicit coalesced manual recovery and
+  connection release on option disable, unload or HA stop. No automatic reconnect loop.
+- Fixed a stale disconnect latch across connection handoff, so an early transport loss
+  cannot leave an adopted connection incorrectly marked healthy.
+- Recorded live HA 2026.9.1 / ESPHome proxy acceptance: 5 hardware scenarios, including
+  stream re-establishment after an HA restart during an automation pause; about 10.5
+  hours on one uninterrupted connection and all 9 daily flush on/off cycles received,
+  with no unavailable flushing/seated entities. A separately maintained HA-native
+  refill automation (not shipped here) acted about 0.5 seconds after flushing ended.
+  This does not identify a refill-complete bit or prove long-term stability.
+- Expanded synthetic BLE and real-HA container lifecycle coverage, including failed
+  unload and connection-handoff loss; updated live-status documentation and limits.
 - Docs: corrected the tested A.O. Smith hot-water signal. The burner-state sensor never
   changed during a real shower; the working trigger is zero-cold-water on or fan speed
   above 0, with a 10-minute restore delay.

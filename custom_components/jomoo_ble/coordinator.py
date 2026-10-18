@@ -15,6 +15,7 @@ from homeassistant.util import dt as dt_util
 
 from .bluetooth import make_session
 from .const import (
+    CONF_ENABLE_STATUS_STREAM,
     CONF_ENABLE_CONTROLS,
     CONF_ENABLE_EXPERIMENTAL,
     CONF_NAME_PREFIX,
@@ -62,6 +63,11 @@ class JomooCoordinator(DataUpdateCoordinator[Snapshot | None]):
         self.controls_enabled: bool = _option(entry, CONF_ENABLE_CONTROLS, False)
         self.experimental_enabled: bool = _option(entry, CONF_ENABLE_EXPERIMENTAL, False)
         self.last_refresh = None
+        self.last_received = None
+        self.stream_enabled = bool(_option(entry, CONF_ENABLE_STATUS_STREAM, False))
+        self.stream_error = "not_connected" if self.stream_enabled else None
+        if self.stream_enabled:
+            self.session.enable_stream(self._stream_changed)
         self.last_warning: str | None = None
         self.guard = ShowerGuard(
             self.session, _HassStore(hass, entry.entry_id), self._guard_changed
@@ -72,7 +78,9 @@ class JomooCoordinator(DataUpdateCoordinator[Snapshot | None]):
             _LOGGER,
             config_entry=entry,
             name=DOMAIN,
-            update_interval=timedelta(seconds=interval) if interval > 0 else None,
+            update_interval=timedelta(seconds=interval)
+            if interval > 0 and not self.stream_enabled
+            else None,
             always_update=True,
         )
         self.data = None
@@ -88,27 +96,52 @@ class JomooCoordinator(DataUpdateCoordinator[Snapshot | None]):
     def _guard_changed(self, _state: GuardState) -> None:
         self.async_update_listeners()
 
+    @callback
+    def _stream_changed(self) -> None:
+        snapshot = self.session.stream_snapshot
+        self.last_received = self.session.last_received
+        if self.session.stream_connected and snapshot is not None:
+            self.stream_error = None
+            self.async_set_updated_data(snapshot)
+        else:
+            self.stream_error = "disconnect_uncertain" if self.session.blocked else "disconnected"
+            self.data = None
+            self.async_update_listeners()
+
     def _publish(self, snapshot: Snapshot) -> None:
+        if self.stream_enabled and not self.session.stream_connected:
+            self._stream_changed()
+            return
         self.last_refresh = dt_util.utcnow()
         self.last_warning = snapshot.warning
+        if self.stream_enabled:
+            live = self.session.stream_snapshot
+            if live is not None:
+                snapshot = Snapshot(
+                    live.frames, warning=snapshot.warning, received_at=live.received_at
+                )
         self.async_set_updated_data(snapshot)
 
     async def _async_update_data(self) -> Snapshot | None:
         try:
             snapshot = await self.session.poll()
         except ERRORS as err:
+            if self.stream_enabled:
+                self._stream_changed()
             # Transport errors may include proxy or address details; keep the message generic.
             raise UpdateFailed(
                 "Bluetooth status query failed; check the proxy and that no other app is connected"
             ) from err
         self.last_refresh = dt_util.utcnow()
         self.last_warning = None
-        return snapshot
+        return self.session.stream_snapshot if self.stream_enabled else snapshot
 
     async def async_refresh_now(self) -> None:
         try:
             snapshot = await self.session.poll()
         except ERRORS as err:
+            if self.stream_enabled:
+                self._stream_changed()
             raise HomeAssistantError(
                 "Status refresh failed; check the proxy and that no other app is connected"
             ) from err
@@ -134,6 +167,12 @@ class JomooCoordinator(DataUpdateCoordinator[Snapshot | None]):
                 f"Command sent but not confirmed{detail}; inspect the toilet before retrying"
             ) from err
         except ERRORS as err:
+            if self.stream_enabled and not self.session.stream_connected:
+                raise HomeAssistantError(
+                    "Live connection unavailable or release uncertain; control blocked. "
+                    "Check connection diagnostics; use Refresh status for recovery, "
+                    "or restart HA after checking an uncertain release"
+                ) from err
             raise HomeAssistantError(
                 "Command failed or unconfirmed; inspect the toilet before retrying"
             ) from err
@@ -148,6 +187,12 @@ class JomooCoordinator(DataUpdateCoordinator[Snapshot | None]):
         except CommandRefused as err:
             raise HomeAssistantError(str(err)) from err
         except ERRORS + (VerificationError,) as err:
+            if self.stream_enabled and not self.session.stream_connected:
+                raise HomeAssistantError(
+                    "Shower guard not confirmed: live connection unavailable. "
+                    "Check diagnostics and manually Refresh status before retrying; "
+                    "uncertain release requires checking Bluetooth and restarting HA"
+                ) from err
             raise HomeAssistantError(
                 "Shower guard change not confirmed; it will be retried by the next call"
             ) from err
@@ -160,6 +205,9 @@ class JomooCoordinator(DataUpdateCoordinator[Snapshot | None]):
         """A manual switch change overrides the shower guard's remembered value."""
         await self.async_command(SetSettings({"auto_cover": enabled}))
         await self.guard.cancel()
+
+    async def async_stop(self, _event) -> None:
+        await self.async_close()
 
     async def async_close(self) -> None:
         await self.async_shutdown()

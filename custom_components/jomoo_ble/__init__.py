@@ -52,17 +52,21 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = JomooCoordinator(hass, entry)
     await coordinator.async_load()
-    # No BLE connection at startup: every connection makes the toilet beep.
+    # No default startup BLE connection; persistent acquisition is explicit opt-in.
     entry.runtime_data = coordinator
     try:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        if coordinator.stream_enabled:
+            # Failure is caught by the coordinator; no setup-retry reconnection loop.
+            await coordinator.async_refresh()
+        elif coordinator.update_interval is not None:
+            entry.async_create_background_task(
+                hass, coordinator.async_refresh(), f"{DOMAIN}_first_refresh"
+            )
     except BaseException:
         await coordinator.async_close()
         raise
-    if coordinator.update_interval is not None:
-        entry.async_create_background_task(
-            hass, coordinator.async_refresh(), f"{DOMAIN}_first_refresh"
-        )
+    entry.async_on_unload(hass.bus.async_listen_once("homeassistant_stop", coordinator.async_stop))
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     return True
 
@@ -72,7 +76,7 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unloaded:
-        await entry.runtime_data.async_close()
-    return unloaded
+    # Confirm physical release before removing diagnostics or allowing a reload.
+    # A failed close raises and leaves this runtime blocked, not falsely unloaded.
+    await entry.runtime_data.async_close()
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

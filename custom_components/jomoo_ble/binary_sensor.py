@@ -67,6 +67,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
         StatusBinarySensor(coordinator, key, *spec) for key, spec in SENSORS.items()
     ]
     entities.append(GuardBinarySensor(coordinator, "guard_active"))
+    if coordinator.stream_enabled:
+        entities.append(StreamConnectedSensor(coordinator, "status_stream_connected"))
     async_add_entities(entities)
 
 
@@ -80,6 +82,31 @@ class StatusBinarySensor(JomooEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool | None:
         return None if self.snapshot is None else self.getter(self.snapshot)
+
+
+class StreamConnectedSensor(JomooEntity, BinarySensorEntity):
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def is_on(self) -> bool:
+        return self.coordinator.session.stream_connected
+
+    @property
+    def extra_state_attributes(self):
+        return {
+            "status": "live" if self.is_on else self.coordinator.stream_error,
+            "disconnect_uncertain": self.coordinator.session.blocked,
+            "recovery": (
+                "Check Bluetooth release, then restart HA"
+                if self.coordinator.session.blocked
+                else "Refresh status manually; no automatic reconnect"
+            ),
+        }
 
 
 class GuardBinarySensor(JomooEntity, BinarySensorEntity):
