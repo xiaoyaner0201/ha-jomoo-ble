@@ -33,9 +33,11 @@
   default is re-enabled; user disables are respected. Display name is Foot sensor / 脚感.
 - The HA-native blueprint snapshots selected switches once, attempts all-off up to 5
   times 30 s apart, then restores the original values and deletes the dynamic scene.
-  Default restore delay is now 10 minutes. HA-start / 5-minute recovery works only if
+  Default restore delay is now 10 minutes. Restore waits until every selected switch
+  is available, so a Bluetooth drop cannot delete the snapshot without restoring it.
+  HA-start / 5-minute recovery works only if
   the scene still exists. `scene.delete` is available in HA 2026.9.1.
-- 脚感升为已验证控制，注册表默认启用，保留实体 ID 与用户禁用选择；蓝图改用 HA 原生快照/恢复，默认延迟 10 分钟。
+- 脚感升为已验证控制，注册表默认启用，保留实体 ID 与用户禁用选择；蓝图改用 HA 原生快照/恢复，默认延迟 10 分钟；所选开关全部可用后才恢复，蓝牙掉线不会丢掉快照。
 
 ### Removed
 

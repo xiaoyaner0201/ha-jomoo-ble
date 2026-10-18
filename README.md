@@ -282,7 +282,10 @@ HA drops running `for:` timers on restart or automation reload. The blueprint ch
 at HA start and every 5 minutes: if hot water has been off for the full delay **and the
 snapshot scene still exists**, restore and delete it. An automation-only reload can
 therefore recover while the dynamic scene remains. The recovery branch is not a new
-snapshot and never guesses an old value.
+snapshot and never guesses an old value. Restore also waits until every selected
+switch is available (on/off): HA silently skips unavailable entities, so restoring
+during a Bluetooth drop would delete the snapshot without restoring anything. The
+snapshot is kept and restored by the next recovery check after the toilet returns.
 
 **Dynamic scenes do not survive an HA restart or a scene reload.** A start trigger
 cannot recover a lost snapshot. Check Automatic lid opening and Foot sensor after an

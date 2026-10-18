@@ -11,7 +11,9 @@ blueprint:
     reserve it exclusively for this blueprint. Do not change inputs while paused.
     All switches must have known on/off states before a new snapshot is taken.
     Recovery at HA start and every 5 min covers a dropped off timer while the
-    scene still exists. IMPORTANT: scene.create scenes do NOT survive HA restart
+    scene still exists. Restore waits until every selected switch is available
+    (on/off), so a temporarily disconnected toilet is restored after it returns.
+    IMPORTANT: scene.create scenes do NOT survive HA restart
     or scene reload. A restart during a pause cannot automatically restore the
     original values. For restart-proof restore, build an automation with one
     persistent input_boolean per switch, or check the switches manually.
@@ -139,6 +141,13 @@ action:
               {{ is_state(hot_water, 'off') and states[snapshot_scene] is not none
                  and (as_timestamp(now()) - as_timestamp(states[hot_water].last_changed))
                      >= timedelta(**restore_delay).total_seconds() }}
+          # HA silently skips unavailable entities, so restoring then would delete the
+          # snapshot without restoring anything. Keep it until every switch is back.
+          - condition: template
+            value_template: >-
+              {{ expand(switches) | count == switches | count
+                 and expand(switches) | map(attribute='state')
+                     | reject('in', ['on', 'off']) | list | count == 0 }}
         sequence:
           - service: scene.turn_on
             target:
