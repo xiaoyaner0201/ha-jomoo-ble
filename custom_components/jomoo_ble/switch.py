@@ -1,13 +1,11 @@
-"""Automatic lid opening (verified, with shower guard) and experimental options."""
+"""Automatic lid opening (verified) and experimental options."""
 
 from __future__ import annotations
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity import EntityCategory
 
-from .const import SERVICE_RESUME, SERVICE_SUSPEND
 from .entity import JomooEntity
 from .lib.client import SetOption, SetSettings
 from .lib.protocol import Option
@@ -49,9 +47,6 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
     entities = [AutoCoverSwitch(coordinator, "auto_cover")]
     entities += [ExperimentalSwitch(coordinator, key) for key in EXPERIMENTAL]
     async_add_entities(entities)
-    platform = entity_platform.async_get_current_platform()
-    platform.async_register_entity_service(SERVICE_SUSPEND, None, "async_suspend")
-    platform.async_register_entity_service(SERVICE_RESUME, None, "async_resume")
 
 
 class AutoCoverSwitch(JomooEntity, SwitchEntity):
@@ -63,25 +58,14 @@ class AutoCoverSwitch(JomooEntity, SwitchEntity):
         return None if settings is None else settings.auto_cover
 
     @property
-    def extra_state_attributes(self) -> dict:
-        state = self.coordinator.guard_state
-        return {
-            "guard_active": state.active,
-            "guard_pending": state.pending,
-            "guard_previous": state.previous,
-        }
+    def available(self) -> bool:
+        return super().available and self.coordinator.controls_enabled
 
     async def async_turn_on(self, **kwargs) -> None:
-        await self.coordinator.async_manual_auto_cover(True)
+        await self.coordinator.async_command(SetSettings({"auto_cover": True}))
 
     async def async_turn_off(self, **kwargs) -> None:
-        await self.coordinator.async_manual_auto_cover(False)
-
-    async def async_suspend(self) -> None:
-        await self.coordinator.async_guard(suspend=True)
-
-    async def async_resume(self) -> None:
-        await self.coordinator.async_guard(suspend=False)
+        await self.coordinator.async_command(SetSettings({"auto_cover": False}))
 
 
 class ExperimentalSwitch(JomooEntity, SwitchEntity):

@@ -1,4 +1,4 @@
-"""On-demand refreshes, optional slow polling, non-optimistic commands, shower guard."""
+"""On-demand refreshes, optional slow polling, non-optimistic commands."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from bleak.exc import BleakError
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -22,33 +21,19 @@ from .const import (
     CONF_POLL_INTERVAL,
     DEFAULT_POLL_INTERVAL,
     DOMAIN,
-    STORAGE_VERSION,
 )
 from .lib.client import (
     FLUSH_UNCONFIRMED,
     Command,
     CommandRefused,
     SessionError,
-    SetSettings,
     Snapshot,
     VerificationError,
 )
-from .lib.guard import GuardState, ShowerGuard
 from .lib.protocol import ProtocolError
 
 _LOGGER = logging.getLogger(__name__)
 ERRORS = (BleakError, OSError, TimeoutError, SessionError, ProtocolError)
-
-
-class _HassStore:
-    def __init__(self, hass: HomeAssistant, entry_id: str) -> None:
-        self._store: Store[dict] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry_id}.guard")
-
-    async def load(self):
-        return await self._store.async_load()
-
-    async def save(self, data: dict) -> None:
-        await self._store.async_save(data)
 
 
 def _option(entry: ConfigEntry, key: str, default):
@@ -69,9 +54,6 @@ class JomooCoordinator(DataUpdateCoordinator[Snapshot | None]):
         if self.stream_enabled:
             self.session.enable_stream(self._stream_changed)
         self.last_warning: str | None = None
-        self.guard = ShowerGuard(
-            self.session, _HassStore(hass, entry.entry_id), self._guard_changed
-        )
         interval = int(_option(entry, CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL))
         super().__init__(
             hass,
@@ -84,17 +66,6 @@ class JomooCoordinator(DataUpdateCoordinator[Snapshot | None]):
             always_update=True,
         )
         self.data = None
-
-    @property
-    def guard_state(self) -> GuardState:
-        return self.guard.state
-
-    async def async_load(self) -> None:
-        await self.guard.load()
-
-    @callback
-    def _guard_changed(self, _state: GuardState) -> None:
-        self.async_update_listeners()
 
     @callback
     def _stream_changed(self) -> None:
@@ -179,32 +150,6 @@ class JomooCoordinator(DataUpdateCoordinator[Snapshot | None]):
         self._publish(snapshot)
         if snapshot.warning == FLUSH_UNCONFIRMED:
             _LOGGER.warning("Flush command sent but the flush flag was not observed")
-
-    async def async_guard(self, suspend: bool) -> None:
-        self._require_controls()
-        try:
-            snapshot = await (self.guard.suspend() if suspend else self.guard.resume())
-        except CommandRefused as err:
-            raise HomeAssistantError(str(err)) from err
-        except ERRORS + (VerificationError,) as err:
-            if self.stream_enabled and not self.session.stream_connected:
-                raise HomeAssistantError(
-                    "Shower guard not confirmed: live connection unavailable. "
-                    "Check diagnostics and manually Refresh status before retrying; "
-                    "uncertain release requires checking Bluetooth and restarting HA"
-                ) from err
-            raise HomeAssistantError(
-                "Shower guard change not confirmed; it will be retried by the next call"
-            ) from err
-        if snapshot is not None:
-            self._publish(snapshot)
-        else:
-            self.async_update_listeners()
-
-    async def async_manual_auto_cover(self, enabled: bool) -> None:
-        """A manual switch change overrides the shower guard's remembered value."""
-        await self.async_command(SetSettings({"auto_cover": enabled}))
-        await self.guard.cancel()
 
     async def async_stop(self, _event) -> None:
         await self.async_close()

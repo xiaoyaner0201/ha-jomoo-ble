@@ -14,7 +14,6 @@ from jomoo_ble.client import (
     SetSettings,
     VerificationError,
 )
-from jomoo_ble.guard import GuardState, ShowerGuard
 from jomoo_ble.protocol import Option, build_frame, parse_frame
 
 E2 = bytes.fromhex("f3f40b2192e24a52b3450900003dfc")
@@ -261,96 +260,6 @@ class SessionTests(unittest.TestCase):
         run(scenario())
         self.assertEqual(device.max_active, 1)
         self.assertEqual(device.connections, 3)
-
-
-class MemoryStore:
-    def __init__(self, data=None):
-        self.data = data
-        self.saves = 0
-
-    async def load(self):
-        return self.data
-
-    async def save(self, data):
-        self.saves += 1
-        self.data = dict(data)
-
-
-class GuardTests(unittest.TestCase):
-    def guard(self, device, data=None):
-        store = MemoryStore(data)
-        guard = ShowerGuard(manager(device), store)
-        run(guard.load())
-        return guard, store
-
-    def test_suspend_then_resume_when_previously_on(self):
-        device = Device()
-        guard, store = self.guard(device)
-        run(guard.suspend())
-        self.assertEqual(guard.state, GuardState(active=True, previous=True))
-        self.assertEqual(store.data, {"active": True, "pending": False, "previous": True})
-        self.assertEqual(len(device.writes), 1)
-        run(guard.resume())
-        self.assertEqual(guard.state, GuardState())
-        self.assertEqual(len(device.writes), 2)
-        self.assertEqual(parse_frame(device.writes[-1]).payload[0] & 0x08, 0x08)
-
-    def test_previously_off_never_written(self):
-        device = Device(e2=with_byte(E2, 0, 0x42), fa=with_byte(FA, 0, 0x42))
-        guard, _ = self.guard(device)
-        run(guard.suspend())
-        self.assertEqual(guard.state, GuardState(active=True, previous=False))
-        run(guard.resume())
-        self.assertEqual(device.writes, [])
-        self.assertEqual(device.connections, 1)  # resume needed no connection at all
-
-    def test_already_active_does_not_connect(self):
-        device = Device()
-        guard, _ = self.guard(device, {"active": True, "previous": True})
-        run(guard.suspend())
-        self.assertEqual(device.connections, 0)
-
-    def test_resume_inactive_is_noop(self):
-        device = Device()
-        guard, _ = self.guard(device)
-        run(guard.resume())
-        self.assertEqual(device.connections, 0)
-
-    def test_failed_resume_keeps_guard(self):
-        device = Device(e2=with_byte(E2, 0, 0x42), fa=with_byte(FA, 0, 0x42), ignore_writes=True)
-        guard, _ = self.guard(device, {"active": True, "previous": True})
-        with self.assertRaises(VerificationError):
-            run(guard.resume())
-        self.assertEqual(guard.state, GuardState(active=True, previous=True))
-
-    def test_failed_suspend_remembers_original_for_retry(self):
-        device = Device(ignore_writes=True)
-        guard, _ = self.guard(device)
-        with self.assertRaises(VerificationError):
-            run(guard.suspend())
-        self.assertEqual(guard.state, GuardState(pending=True, previous=True))
-        # The write actually landed late; a retry must not record "was off".
-        device.ignore_writes = False
-        device.e2 = with_byte(E2, 0, 0x42)
-        device.fa = with_byte(FA, 0, 0x42)
-        run(guard.suspend())
-        self.assertEqual(guard.state, GuardState(active=True, previous=True))
-        run(guard.resume())
-        self.assertTrue(parse_frame(device.writes[-1]).payload[0] & 0x08)
-
-    def test_refused_suspend_keeps_state_clean(self):
-        device = Device(e9=with_byte(E9, 3, 0x20))
-        guard, _ = self.guard(device)
-        with self.assertRaises(CommandRefused):
-            run(guard.suspend())
-        self.assertFalse(guard.state.active)
-
-    def test_cancel(self):
-        device = Device()
-        guard, store = self.guard(device, {"active": True, "previous": True})
-        run(guard.cancel())
-        self.assertEqual(guard.state, GuardState())
-        self.assertEqual(store.data["active"], False)
 
 
 if __name__ == "__main__":

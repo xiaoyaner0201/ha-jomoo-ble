@@ -6,7 +6,7 @@ Usage (inside the container, never against a production config directory):
 
 Starts a throwaway HomeAssistant core in a temp config dir (no HTTP, no real bluetooth),
 patches the BLE connector with a fake toilet, and exercises setup, entities, services,
-shower guard, options and unload.
+migration, options and unload.
 """
 
 import asyncio
@@ -196,20 +196,67 @@ async def main():
         "_filter_remaining",
         "_work_status",
         "_seated",
-        "_guard_active",
         "_last_refresh",
     ):
         eid = next(e.entity_id for e in ents if e.unique_id.endswith(suffix))
         print("  ", suffix, hass.states.get(eid).state)
 
-    # Controls disabled -> service must fail
+    # Removed policy APIs stay absent; manual writes use the ordinary command gate.
+    assert not hass.services.has_service("jomoo_ble", "suspend_auto_cover")
+    assert not hass.services.has_service("jomoo_ble", "resume_auto_cover")
+    assert not any(k.startswith("guard_") for k in hass.states.get(sw).attributes)
     try:
-        await hass.services.async_call(
-            "jomoo_ble", "suspend_auto_cover", {"entity_id": sw}, blocking=True
-        )
-        print("ERROR: suspend allowed while controls disabled", len(state["writes"]))
-    except Exception as e:
-        print("controls disabled ->", type(e).__name__, e)
+        await entry.runtime_data.async_command(client_mod.SetSettings({"auto_cover": False}))
+        raise AssertionError("controls disabled allowed a write")
+    except HomeAssistantError:
+        pass
+    assert not state["writes"]
+
+    # Real storage + registry migration, no connection/write, exactly one warning.
+    from homeassistant.helpers.storage import Store
+    import unittest
+    from unittest.mock import AsyncMock, patch
+
+    integration_mod = importlib.import_module("custom_components.jomoo_ble")
+    registry = er.async_get(hass)
+    stale = registry.async_get_or_create(
+        "binary_sensor",
+        "jomoo_ble",
+        f"{entry.data['address']}_guard_active",
+        config_entry=entry,
+    )
+    store = Store(hass, 1, f"jomoo_ble.{entry.entry_id}.guard")
+    store_path = pathlib.Path(cfg) / ".storage" / f"jomoo_ble.{entry.entry_id}.guard"
+    case = unittest.TestCase()
+    for legacy in ({"active": True}, {"pending": True}):
+        await store.async_save({**legacy, "previous": True})
+        before = state["conns"]
+        with case.assertLogs("custom_components.jomoo_ble", level="WARNING") as logs:
+            assert await hass.config_entries.async_reload(entry.entry_id)
+            await hass.async_block_till_done()
+        assert len(logs.records) == 1, logs.output
+        assert "no longer restores it automatically" in logs.output[0]
+        assert not store_path.exists()
+        assert not state["writes"] and state["conns"] == before
+    assert registry.async_get(stale.entity_id) is None
+    # A missing store is silent, removal is also run on config-entry deletion.
+    with case.assertNoLogs("custom_components.jomoo_ble", level="WARNING"):
+        await integration_mod._async_remove_legacy_guard(hass, entry, warn=True)
+    await store.async_save({"active": True})
+    await integration_mod.async_remove_entry(hass, entry)
+    assert not store_path.exists() and not state["writes"]
+    # Both a broken read and an unremovable file are best effort.
+    with (
+        patch.object(Store, "async_load", AsyncMock(side_effect=OSError)),
+        patch.object(Store, "async_remove", AsyncMock(side_effect=OSError)) as remove,
+    ):
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+        remove.assert_awaited_once()
+    assert state["conns"] == before and not state["writes"]
+    print(
+        "legacy migration PASS: active/pending warning once, store/entity removed, no BLE; I/O failure tolerated"
+    )
 
     # Enable controls via options flow
     r = await hass.config_entries.options.async_init(entry.entry_id)
@@ -224,29 +271,11 @@ async def main():
     entry = hass.config_entries.async_entries("jomoo_ble")[0]
     print("options", dict(entry.options), "state", entry.state)
 
-    # Shower guard
-    await hass.services.async_call(
-        "jomoo_ble", "suspend_auto_cover", {"entity_id": sw}, blocking=True
-    )
-    a = hass.states.get(sw)
-    print(
-        "after suspend: auto_cover",
-        a.state,
-        {k: v for k, v in a.attributes.items() if k.startswith("guard")},
-        "last write",
-        state["writes"][-1],
-    )
-    await hass.services.async_call(
-        "jomoo_ble", "resume_auto_cover", {"entity_id": sw}, blocking=True
-    )
-    a = hass.states.get(sw)
-    print(
-        "after resume: auto_cover",
-        a.state,
-        {k: v for k, v in a.attributes.items() if k.startswith("guard")},
-        "last write",
-        state["writes"][-1],
-    )
+    # Manual automatic-lid switch uses fresh-read/single-write/read-back commands.
+    for service, expected in (("turn_off", "off"), ("turn_on", "on")):
+        await hass.services.async_call("switch", service, {"entity_id": sw}, blocking=True)
+        assert hass.states.get(sw).state == expected
+        assert not any(k.startswith("guard_") for k in hass.states.get(sw).attributes)
 
     # Mechanical + flush
     ob = next(e.entity_id for e in ents if e.unique_id.endswith("_open_lid"))
@@ -279,7 +308,8 @@ async def main():
     # diagnostics
     diag = importlib.import_module("custom_components.jomoo_ble.diagnostics")
     d = await diag.async_get_config_entry_diagnostics(hass, entry)
-    print("diag address redacted:", d["entry"]["data"]["address"], "guard", d["guard"])
+    assert "guard" not in d
+    print("diag address redacted:", d["entry"]["data"]["address"])
 
     # Opt-in stream lifecycle through real options reload, entities and services.
     state["handoff_loss"] = "--handoff" in sys.argv
@@ -391,20 +421,12 @@ async def main():
     )
     assert state["conns"] == physical
     await coordinator.async_command(client_mod.SetSettings({"auto_cover": True}))
-    writes_before_guard = len(state["writes"])
-    await hass.services.async_call(
-        "jomoo_ble", "suspend_auto_cover", {"entity_id": sw}, blocking=True
-    )
-    assert entry.runtime_data.guard_state.previous is True
-    assert entry.runtime_data.guard_state.active
-    assert hass.states.get(sw).state == "off"
-    await hass.services.async_call(
-        "jomoo_ble", "resume_auto_cover", {"entity_id": sw}, blocking=True
-    )
-    assert len(state["writes"]) == writes_before_guard + 2
-    assert hass.states.get(sw).state == "on"
+    writes_before_switch = len(state["writes"])
+    for service, expected in (("turn_off", "off"), ("turn_on", "on")):
+        await hass.services.async_call("switch", service, {"entity_id": sw}, blocking=True)
+        assert hass.states.get(sw).state == expected
+    assert len(state["writes"]) == writes_before_switch + 2
     assert state["conns"] == physical
-    assert not entry.runtime_data.guard_state.active
 
     # Physical loss immediately invalidates state. No timer or command reconnects.
     lost_client = clients[-1]
@@ -449,7 +471,7 @@ async def main():
     assert not coordinator.session._lock.locked()
     assert not any(c.is_connected for c in clients)
     print(
-        "stream lifecycle assertions PASS: startup, off/on/off, freshness, single client, guard, loss, manual recovery, option release, IDs"
+        "stream lifecycle assertions PASS: startup, off/on/off, freshness, single client, controls, loss, manual recovery, option release, IDs"
     )
 
     # Failed opt-in startup remains loaded/off, never entering HA setup retry.

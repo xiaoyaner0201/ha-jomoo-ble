@@ -1,4 +1,4 @@
-"""Lid/ring position and motion, occupancy, flushing, faults and shower-guard state."""
+"""Lid/ring position and motion, occupancy, flushing, faults."""
 
 from __future__ import annotations
 
@@ -66,7 +66,6 @@ async def async_setup_entry(hass, entry, async_add_entities):
     entities: list[BinarySensorEntity] = [
         StatusBinarySensor(coordinator, key, *spec) for key, spec in SENSORS.items()
     ]
-    entities.append(GuardBinarySensor(coordinator, "guard_active"))
     if coordinator.stream_enabled:
         entities.append(StreamConnectedSensor(coordinator, "status_stream_connected"))
     async_add_entities(entities)
@@ -107,16 +106,3 @@ class StreamConnectedSensor(JomooEntity, BinarySensorEntity):
                 else "Refresh status manually; no automatic reconnect"
             ),
         }
-
-
-class GuardBinarySensor(JomooEntity, BinarySensorEntity):
-    _attr_icon = "mdi:shower-head"
-
-    @property
-    def available(self) -> bool:
-        return True
-
-    @property
-    def is_on(self) -> bool:
-        state = self.coordinator.guard_state
-        return state.active or state.pending

@@ -33,7 +33,7 @@
         "description": "Connections beep and only one central is allowed. Opt-in live status holds Bluetooth continuously, blocking the official app until disabled/unloaded; initial connection beeps. In stream mode polling is ignored and disconnect requires manual Refresh status to retry.",
         "data": {
           "enable_status_stream": "Enable persistent live status (single central; connection beeps)",
-          "enable_controls": "Enable verified controls (lid, seat ring, small flush, automatic lid opening, shower guard)",
+          "enable_controls": "Enable verified controls (lid, seat ring, small flush, automatic lid opening)",
           "enable_experimental": "Enable experimental controls (not yet verified on hardware)",
           "poll_interval": "Automatic refresh interval in seconds (0 = off, otherwise 300–86400)"
         }
@@ -45,7 +45,9 @@
   },
   "entity": {
     "binary_sensor": {
-      "status_stream_connected": {"name": "Live status connection"},
+      "status_stream_connected": {
+        "name": "Live status connection"
+      },
       "lid_open": {
         "name": "Lid"
       },
@@ -78,9 +80,6 @@
       },
       "foam_low": {
         "name": "Foam liquid low"
-      },
-      "guard_active": {
-        "name": "Shower guard active"
       }
     },
     "button": {
@@ -130,7 +129,9 @@
       }
     },
     "sensor": {
-      "last_status_received": {"name": "Last status received"},
+      "last_status_received": {
+        "name": "Last status received"
+      },
       "filter_remaining": {
         "name": "Filter remaining"
       },
@@ -211,14 +212,6 @@
           "description": "The toilet to refresh."
         }
       }
-    },
-    "suspend_auto_cover": {
-      "name": "Suspend automatic lid opening",
-      "description": "Shower guard: remember the current automatic lid opening setting and turn it off."
-    },
-    "resume_auto_cover": {
-      "name": "Resume automatic lid opening",
-      "description": "Shower guard: restore the setting remembered by the last suspend (never turns it on if it was off)."
     }
   }
 }
