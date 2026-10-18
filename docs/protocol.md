@@ -155,14 +155,19 @@ auto lid on  f3f40f9221194a52b330001000000000006afc
 Front-wash pressure and nozzle share the rear slots in this frame. Gesture, night light,
 power save and front-wash values are therefore read-only in this project.
 
-### Option frame (10 bytes): `F3 F4 06 92 21 1F SUB VAL CS FC` **App-derived**
+### Option frame (10 bytes): `F3 F4 06 92 21 1F SUB VAL CS FC`
+
+Foot sensor off/on (SUB `24`) is **Verified** on ZS800J with HA 2026.9.1:
+FA p7 `0x33` → `0x13` → `0x33`, with every other setting unchanged.
+All other option writes below remain **App-derived**, unverified on hardware.
+The same fresh-read, single-write, read-back and unchanged-setting checks apply.
 
 | Setting | SUB | On | Off | Read-back |
 | --- | --- | --- | --- | --- |
 | UV water disinfection | `21` | `40` | `20` | FA p5 bit 5 |
 | Close lid before flush | `25` | `01` | `02` | FA p4 bit 1 |
 | Automatic small flush | `25` | `04` | `08` | FA p7 bit 4 |
-| Foot sensor | `24` | `01` | `02` | FA p7 bit 5 |
+| Foot sensor (**Verified** off/on) | `24` | `01` | `02` | FA p7 bit 5 |
 | Ambient light | `33` | `20` | `10` | FA p5 bit 4 |
 
 Not implemented on purpose:

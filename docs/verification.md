@@ -1,136 +1,159 @@
 # Verification record
 
-This record keeps three layers of evidence separate: offline tests, a real Home
-Assistant runtime, and physical hardware.
+Evidence is separated into offline tests, a real Home Assistant runtime with a fake
+BLE device, and previously supplied physical-device acceptance. Container tests do
+not prove physical Bluetooth/proxy behaviour. No new live-system test was run for
+this refactor.
 
-## Offline (CI)
+## 0.4.0 — current verification
 
-- `python -m unittest discover -s tests -v` covers protocol, sessions, guard and
-  synthetic stream acquisition/lifecycle tests, including connection-handoff loss.
-  - Every decoder is checked against the hardware fixtures.
-  - All seven verified function-frame vectors are reproduced byte for byte.
-  - A single-field change only touches its own bits.
-  - Read-only fields and out-of-range values are refused, and option frames are covered.
-  - Session gates are checked: busy, seated, moving or in-transit states are refused;
-    an unrelated setting change raises with a diff; an unconfirmed action or flush is
-    reported as such; a failed write is not retried.
-  - Disconnect uncertainty blocks further connections, and the lock serialises sessions.
-  - The shower-guard truth table is covered, including a failed suspend that keeps the
-    original value, so a retry cannot record "was off" by mistake.
-- `scripts/check_repository.py` compiles every source, parses JSON and checks local
-  links. It also rejects any non-fictional MAC address, private IPv4 address, private
-  path or vendor package.
-- `scripts/sync_library.py --check` confirms the bundled `lib/` is byte-identical to
-  the canonical library.
-- `ruff check .` and `ruff format --check .` pass.
+### Offline checks
 
-## Home Assistant runtime (real HA 2026.9.1 container, isolated temp config, fake toilet)
+- `python -m unittest discover -s tests -v`: **60 tests pass**. Existing protocol,
+  transport and stream coverage is retained; tests for the deleted policy module are
+  removed. New foot-sensor cases cover off/on read-back (`0x33` → `0x13` → `0x33`),
+  already-at-target no-op, unrelated-setting rejection, unconfirmed writes and no retry
+  after write failure.
+- Decoders use sanitized hardware fixtures; function-frame vectors round-trip exactly.
+  Single-field changes only touch their own bits. Read-only/out-of-range fields,
+  E2/FA disagreement, busy/seated/moving states, ambiguous flush completion, missing
+  frames, disconnect uncertainty and concurrent sessions remain covered.
+- Stream tests retain full initial-query/freshness gates, no cached control settings,
+  shared connection ownership, handoff loss, cancellation, failed release and explicit
+  coalesced manual recovery. No periodic queries or automatic reconnect loop is added.
+- `python scripts/check_repository.py`: compile, JSON metadata, local links and public
+  artifact hygiene pass (**25 Python sources**). `python scripts/sync_library.py --check`
+  confirms the bundled library is byte-identical to the canonical library.
+- Ruff **0.15.4**: `ruff check .` and `ruff format --check .` pass.
+  `git diff --check` passes.
 
-`tests/ha_smoke/smoke_in_ha_container.py` checks the following:
+### Real HA 2026.9.1 container
 
-- The manifest and Bluetooth matcher load, and en / zh-Hans translations resolve
-  (54 entity strings each).
-- A config flow with a bad MAC returns the form error; a valid one creates the entry
-  with a single connection.
-- Setup makes no extra connection. Entities start as *unknown*, not unavailable.
-- The Refresh button fills lid, ring, filter (91.6 %), work status (standby), seated and
-  last refresh.
-- With controls disabled, the guard service is refused. With controls enabled, the
-  options flow rejects a poll interval of 60 and accepts 0.
-- Shower guard:
-  - `suspend_auto_cover` writes the verified *off* frame, giving
-    `guard_active: true, guard_previous: true`;
-  - `resume_auto_cover` writes the verified *on* frame and clears the guard.
-- The open-lid and small-flush buttons are confirmed by read-back.
-- The `jomoo_ble.refresh` service connects once.
-- Diagnostics redact the address, and unload succeeds.
+All three invocations of `tests/ha_smoke/smoke_in_ha_container.py` exit **0**: normal,
+`--uncertainty` and `--handoff`. Each uses the official HA 2026.9.1 image, a read-only
+repository mount, temporary configuration, `--network none --memory 2g --cpus 2 --rm`,
+and no production config, credentials or Bluetooth devices.
 
-## Opt-in stream (offline and HA container)
+The real config/options flows, integration, coordinator, entities, services, entity
+registry and storage are exercised. Only physical BLE discovery/establishment and
+traffic are faked. Assertions cover:
 
-See [status-stream.md](status-stream.md) for acquisition semantics and limitations.
-The earlier 90-second passive observation is protocol evidence; implementation-level
-hardware acceptance is recorded separately below. FA payload[5] bit0 remains unknown;
-there is no refill sensor or pump policy.
+- Invalid address and poll interval handling, one read-only config-flow connection,
+  no extra default setup connection, Refresh button/service, mechanical/flush read-back,
+  diagnostics address redaction and unload. Both locales resolve **53 entity strings**.
+- **Migration of removed policy APIs:** both former suspend/resume services are absent,
+  no guard attributes or remembered-state sensor is exposed, and diagnostics contain
+  no policy block. Active and pending obsolete stores each produce exactly one setup
+  warning, are removed through HA Store, and do not cause BLE connections/writes.
+  Missing stores are silent; read/remove I/O failure cannot prevent setup. Config-entry
+  deletion also cleans storage. The stale policy sensor registry entry is removed.
+- Foot sensor is a normal CONFIG switch, enabled in the registry by default and available
+  with verified controls on / experimental controls off. The unique ID/entity ID stays
+  unchanged. An integration-disabled default is re-enabled; a user disable is retained.
+  Both verified switches call the ordinary command path, and the controls gate refuses
+  direct calls when disabled.
+- Persistent-stream startup uses read-only full queries and one physical client. Passive
+  flush off/on/off, receive timestamps, silence, shared commands/refresh, loss and manual
+  recovery, option disable, stable IDs, failed startup without scheduled retry,
+  entry re-creation with retained options and HA stop all remain asserted.
+- `--uncertainty`: failed physical release retains ownership, marks HA FAILED_UNLOAD,
+  refuses reload/control and exposes diagnostics. `--handoff`: authoritative loss before
+  adoption releases the client, leaves HA off/unavailable, blocks writes/reconnect and
+  permits explicit recovery; stale callbacks cannot contaminate the recovered client.
 
-The extended smoke test uses the real HA 2026.9.1 coordinator, entities, services, options
-and registry, faking only BLE discovery/establishment and device traffic. It also fixes
-old smoke entity lookups that matched `last_refresh` instead of the Refresh button and
-`auto_small_flush` instead of the small-flush button. Assertions now target actual buttons.
-Stream tests assert startup/no polling, off/on/off, timestamps, one physical client,
-guard preservation, loss/unavailability, coalesced recovery, failed startup without a
-scheduled retry, option release, stable IDs, entry restart with retained options, unload and HA stop.
-A second `--uncertainty` run verifies failed physical release retains ownership,
-marks HA FAILED_UNLOAD, blocks reload/control, and exposes the diagnostic.
-A third `--handoff` run checks transport loss before connection adoption through the
-real HA adapter, coordinator and entities, including release and manual recovery.
-The stale disconnect latch across connection handoff was fixed in `99d9692`.
-These are synthetic assertions, not real proxy or toilet results.
+### HA-native blueprint
 
-## Opt-in stream hardware acceptance (HA 2026.9.1, ESPHome Bluetooth proxy)
+`tests/ha_smoke/blueprint_scenario.py` imports the published YAML through HA's own
+blueprint loader and validates the expanded automation with the real HA validator.
+Both the default **10-minute** delay and a short test delay validate. The runtime
+reports:
 
-- `enable_status_stream` was explicitly enabled in a real HA 2026.9.1 installation
-  through an ESPHome Bluetooth proxy. Flush start and end reached HA in real time via
-  passive notifications, without periodic queries.
+```text
+scene.delete exists in HA 2026.9.1: registered by homeassistant.scene
+blueprint validation PASS: imported, default 10 min and short-delay automation config valid
+blueprint scenario PASS: foot originally on, snapshot preserved, restored, scene deleted
+blueprint scenario PASS: foot originally off, snapshot preserved, restored, scene deleted
+blueprint partial failure PASS: other switch paused, hot-water off interrupted retry wait
+blueprint recovery PASS: lost off timer restored while snapshot exists
+```
+
+A core input_boolean/template binary sensor supplies hot-water state; the fake toilet's
+real integration switches supply target states. Hot water on creates a snapshot and
+turns both switches off. Re-triggering cannot overwrite the original values. Off for
+0.1 s restores them, including an originally-off foot sensor, then deletes the scene.
+A failed first switch does not block the other; hot-water off interrupts the retry
+wait. Disabling/re-enabling the automation drops its off timer; directly invoking the
+same recovery action branch restores an existing scene. This is **not** an assertion
+that a restart preserves a scene, nor a wall-clock five-minute recovery test.
+
+Dynamic scenes are memory-only: HA restart or scene reload loses the snapshot. The
+blueprint cannot automatically restore a pause interrupted that way. Use persistent
+helpers per switch for restart-proof memory, or inspect the switches manually. Scene
+restoration is best effort, not transactional, and manual changes do not cancel it.
+
+### Foot sensor hardware evidence (supplied acceptance)
+
+On a ZS800J with HA 2026.9.1, the SUB `0x24` option was verified off → on with read-back:
+FA p7 `0x33` → `0x13` → `0x33`, every other setting unchanged. This supports promotion
+of **Foot sensor / 脚感**, not other option writes or other toilet models. The 0.4.0
+container/offline checks are separate regression evidence, not a new hardware session.
+
+## History — pre-0.4.0 runtime and policy acceptance
+
+The earlier integration had its own persistent pause/restore policy, exercised in
+synthetic tests and a real HA 2026.9.1 runtime with a fake toilet. Historical physical
+acceptance also confirmed the policy's off/on frames. One first write landed but lacked
+an E2 reply; resending read-only queries within the timeout fixed verification without
+retrying actuator writes. Retrying the old policy then confirmed off and restored on.
+These records describe **removed behaviour**, not the 0.4.0 architecture or guarantees.
+The earlier translation count was 54 per locale, before removal of its policy sensor.
+
+## History — opt-in stream hardware acceptance (HA 2026.9.1, ESPHome proxy)
+
+See [status-stream.md](status-stream.md) for current acquisition semantics.
+
+- Explicitly enabling persistent status delivered flush start/end via passive
+  notifications without periodic queries.
 - All 5 end-to-end hardware scenarios passed, including stream re-establishment after
-  HA restarted during an automation pause. A separately maintained HA-native refill
-  automation, not included in this repository, acted about 0.5 seconds after flushing
-  ended. This validates an external consumer of `flushing`, not a refill-complete bit.
-- After the final installation, a single connection remained up for about 10.5 hours
-  with no disconnects. All 9 daily flushes delivered `flushing` on → off; entities such
-  as Flushing and Seated never became unavailable during that observation window.
-- These results do not establish long-term stability or hardware fault-injection
-  coverage for every disconnect, phone handover, proxy failure or concurrent command /
-  guard path. Long-term observation continues.
-- Existing limits remain: one central (the official mini program cannot connect while
-  HA holds Bluetooth), a beep per physical connection, no heartbeat or silence-based
-  disconnect detection, and unknown FA payload[5] bit0 with no refill entity. Failed
-  unload requires manual Bluetooth-release checks and an HA restart; reload alone
-  is not a recovery guarantee.
+  an HA restart during an automation pause. This proves stream re-establishment only,
+  **not** preservation of the new blueprint's snapshot across restart.
+- After the final installation, one connection stayed up about 10.5 hours without
+  disconnects. All 9 daily flushes delivered on → off; Flushing and Seated never became
+  unavailable in that window.
+- A separately maintained HA-native refill automation, not shipped here, acted about
+  0.5 seconds after flushing ended. This validates an external consumer of `flushing`,
+  not a refill-complete bit. FA payload[5] bit0 remains unknown; no refill sensor exists.
+- A preceding 90-second passive observation was protocol evidence, not implementation
+  acceptance. The handoff disconnect latch was fixed in `99d9692` with offline/HA
+  regression tests; these do not simulate every physical proxy/phone failure.
+- Long-term stability remains under observation. Single-central ownership, a beep per
+  connection, no heartbeat and manual checks/restart after uncertain release remain
+  limitations. HA 2026.9.1 refuses reload after FAILED_UNLOAD.
 
-## Hardware (one ZS800J, ESPHome proxy beside the toilet)
+## History — initial hardware and HA acceptance
 
-Verified with read-back and with all other settings unchanged:
-- status query;
-- open and close lid;
-- open and close seat ring;
-- small flush (also heard by the owner);
-- automatic lid opening off and on.
+One ZS800J with a nearby ESPHome proxy verified read-only status, lid open/close,
+seat-ring open/close, small flush and automatic lid opening off/on, with read-back and
+all other settings unchanged. HA discovery and a single read-only setup check succeeded;
+Refresh returned standby, lid/ring closed, automatic lid opening on and filter 91.6 %.
+Experimental switches/numbers and large flush remain unverified on hardware.
 
-## Production Home Assistant (HA 2026.9.1, same toilet and proxy)
+## History — corrected hot-water signal
 
-- Bluetooth discovery found the toilet; the confirm step's one read-only check succeeded.
-- `Refresh status` returned standby, lid and ring closed, automatic lid opening on,
-  filter 91.6 %.
-- With controls enabled, `jomoo_ble.suspend_auto_cover` was run once via the HA service API.
-  The first attempt wrote the off frame but never saw the E2 reply to the re-check, so
-  the guard stayed *pending* while still remembering "was on". The client now re-sends
-  the read-only query every 2 s within the timeout (actions are still never retried).
-  After that fix the retried suspend confirmed off, and `resume_auto_cover` restored on
-  and cleared the guard.
+An A.O. Smith gas heater was integrated through Ai-Link A.O. Smith v1.4.0. Its 30-minute
+app token was renewed/persisted at two consecutive expiries and queries continued every
+60 s. The earlier recommended burner-state signal did not change during a shower
+(about 3000 rpm fan, 44% burner duty, 42 °C outlet). The corrected signal is
+**zero-cold-water on or fan speed above 0**, verified on recirculation start/stop, with
+**10-minute** restoration delay. A full corrected-signal shower cycle has not been
+recorded. An automation reload dropped the old off timer; a separately configured
+fallback restored the old policy. That fallback is obsolete in 0.4.0: use the new
+blueprint's recovery while its scene exists, respecting the restart limitation.
 
-## Water-heater signal (same household)
+## History — Bluetooth proxy scanning mode
 
-- The A.O. Smith gas heater is in HA through Ai-Link A.O. Smith v1.4.0.
-- The app token lasts 30 minutes. It was renewed and persisted at two consecutive expiries,
-  and the coordinator kept succeeding every 60 s.
-- Correction: the burner-state template recommended in 0.2.0 never fired. During the first
-  real shower its sensor stayed "not heating" (fan about 3000 rpm, 44% burner duty, outlet
-  42 °C), and the automation had never been triggered since it was created. The trigger
-  was changed to "zero-cold-water switch on, or fan speed above 0". Applied while
-  recirculation was running, the new signal turned on at once and triggered the
-  automation, and it went off when recirculation stopped. The restore delay is now
-  10 minutes. A full shower with the new trigger from start to finish has not been
-  recorded yet.
-- Saving the automation while hot water was already off dropped the running `for:`
-  timer, so the guard was never restored. A periodic fallback automation (see README)
-  then restored automatic lid opening by itself, and the guard cleared.
-
-## Bluetooth proxy scanning mode
-
-- After an HA reload, every entity became unavailable: the integration refused the toilet
-  as "Unsupported advertised model". HA showed the advertisement at -63 dBm, but its name
-  was the MAC address, because HA 2026.9 had left the ESPHome proxy in *Auto* scanning
-  mode (passive most of the time). After setting the ESPHome entry's scanning mode to
-  *Active*, the name `JOMOO_SMART_237369` arrived within a minute and Refresh succeeded.
-
-Not yet exercised on hardware: the experimental switches and numbers, and large flush.
+After HA reload, a strong advertisement lacked the model name because HA's ESPHome
+entry used Auto scanning (passive most of the time). The integration correctly refused
+an unsupported advertised model. Setting HA-side scanning to **Active** delivered
+`JOMOO_SMART_237369` and allowed Refresh. ESPHome YAML `active: true` alone does not
+override HA's scanning mode.

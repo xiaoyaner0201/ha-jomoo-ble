@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.4.0
+
+### Breaking changes
+
+- Removed `jomoo_ble.suspend_auto_cover` / `jomoo_ble.resume_auto_cover`, the automatic
+  lid switch's `guard_active`, `guard_pending`, `guard_previous` attributes and the
+  Shower guard active binary sensor. Cross-device policy now belongs entirely in HA
+  automations/scripts/blueprints; the integration exposes device capabilities only.
+- Replaced the blueprint's `toilet` input with a generic `switches` list and HA-native
+  scene snapshot/restore. Re-import/update it and edit or recreate existing automations.
+- Unlike the removed policy, dynamic scenes do not survive HA restart or scene reload;
+  manual changes during a pause do not cancel the saved snapshot restoration.
+- **不兼容变更**：移除暂停/恢复服务、守护属性和「淋浴守护生效中」传感器。
+  跨设备策略移至 HA 自动化/脚本/蓝图；旧蓝图需更新，并将 `toilet` 改为 `switches`。
+  动态快照无法跨 HA 重启或场景重载保留，手动改开关不再取消恢复。
+
+### Added
+
+- Best-effort cleanup of obsolete guard storage and its sensor registry entry.
+  An active/pending old pause produces one setup warning to check Automatic lid opening.
+  Cleanup never connects to or writes the device.
+- Real-HA migration and blueprint tests, including original off-state preservation,
+  re-trigger protection, per-switch failure isolation and dropped-timer recovery.
+
+### Changed
+
+- Foot sensor is a hardware-verified configuration switch, enabled in the entity registry
+  by default and gated by `enable_controls`, not `enable_experimental`. ZS800J / HA
+  2026.9.1 read-back confirmed FA p7 `0x33` → `0x13` → `0x33`, other settings unchanged.
+  Its unique ID and existing entity ID remain unchanged. Only an old integration-disabled
+  default is re-enabled; user disables are respected. Display name is Foot sensor / 脚感.
+- The HA-native blueprint snapshots selected switches once, attempts all-off up to 5
+  times 30 s apart, then restores the original values and deletes the dynamic scene.
+  Default restore delay is now 10 minutes. HA-start / 5-minute recovery works only if
+  the scene still exists. `scene.delete` is available in HA 2026.9.1.
+- 脚感升为已验证控制，注册表默认启用，保留实体 ID 与用户禁用选择；蓝图改用 HA 原生快照/恢复，默认延迟 10 分钟。
+
+### Removed
+
+- The integration's persistent shower-guard policy, library modules, entity services,
+  diagnostic block and remembered-state sensor/attributes. Device command safety,
+  no-retry transport writes and optional live-status lifecycle remain unchanged.
+
+### Migration
+
+1. Stop the old automation and check/restore a currently paused lid setting before
+   upgrading. Replace the complete component directory (including `lib/`) and restart HA.
+   Setup discards old memory without restoring the device.
+2. Enable verified controls, re-import the blueprint at its original path, select
+   Automatic lid opening and Foot sensor in `switches`, and reserve a unique `scene_id`.
+3. Delete/replace service-based automations and old fallbacks referencing the removed
+   sensor or guard attributes. Verify both initially-on and initially-off values restore.
+4. For restart-proof restoration, implement a persistent `input_boolean` per switch in
+   your own automation, or check switches manually after an interrupted pause.
+5. 升级前检查暂停中的自动翻盖；更新后重新导入蓝图并选择自动翻盖和脚感；删除旧服务调用和守护兜底。
+   跨重启恢复需逐开关持久辅助实体，或人工检查。完整迁移步骤见中英文 README。
+
 ## 0.3.0
 
 - Added opt-in persistent live status (`enable_status_stream`), disabled by default.

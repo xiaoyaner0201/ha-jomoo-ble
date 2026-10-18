@@ -1,6 +1,7 @@
 # Development boundaries
 
 - This is an original clean-room implementation based on wire-level facts.
+- Expose device capabilities only; cross-device policy belongs in HA automations/blueprints. Do not consume other integrations' entities.
 - Never import/copy vendor source or packages; protocol observations are not vendor code.
 - Do not contact a live toilet, proxy, Home Assistant instance, or heater during tests.
 - Do not add credentials, personal identifiers, private paths, or unredacted captures.

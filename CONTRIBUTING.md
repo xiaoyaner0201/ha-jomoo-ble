@@ -5,7 +5,9 @@ copied vendor algorithms. Do not contribute extracted mini-program source,
 packages, assets, private device identifiers, credentials or household details.
 
 1. Work in an isolated branch/worktree. Start with offline regression tests.
-2. Keep `jomoo_ble` independent of Home Assistant and radio dependencies.
+2. Keep `jomoo_ble` independent of Home Assistant and radio dependencies. The integration
+   exposes device capabilities only; cross-device policy belongs in HA automations or
+   blueprints, not in the device coordinator or consumers of other integrations' entities.
 3. Synchronize the bundled library: `python scripts/sync_library.py`.
 4. Run `python -m unittest discover -s tests -v`,
    `python scripts/check_repository.py`, `python scripts/sync_library.py --check`,
