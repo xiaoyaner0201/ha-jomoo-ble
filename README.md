@@ -6,32 +6,91 @@ Local Bluetooth control of the **JOMOO ZS800J** smart toilet from Home Assistant
 any connectable HA Bluetooth adapter or an ESPHome Bluetooth proxy placed near the toilet.
 No cloud, no account, no vendor code.
 
-<!-- STORY:START -->
+## ⚠️ Breaking changes in 0.4.0
+
+**Upgrade action is required if you used shower guard.** Removed:
+`jomoo_ble.suspend_auto_cover` / `jomoo_ble.resume_auto_cover`, the automatic lid
+switch's `guard_active`, `guard_pending`, `guard_previous` attributes, and the
+*Shower guard active* binary sensor. The old blueprint and any automation referencing
+these services, sensor or attributes are affected.
+
+A device integration exposes device capabilities: entities, device actions and the
+device page. Cross-device policy — when hot water flows, pause settings and restore
+them later — belongs in Home Assistant automations, scripts and blueprints, not in
+the device integration. The replacement uses HA's own scene snapshot/restore.
+
+### Migrate from 0.3.x or earlier
+
+1. Before upgrading, stop the old automation and check/restore Automatic lid opening
+   if a pause is in progress. Updating never restores or writes a device setting.
+2. Update the integration and restart HA. Obsolete policy storage and the old sensor's
+   registry entry are removed best effort. An active/pending old pause logs one warning
+   to check Automatic lid opening; its previous value is not migrated into a scene.
+3. Re-import/update the blueprint at the same path and edit or recreate its automation:
+   replace the old `toilet` input with `switches`, selecting **Automatic lid opening**
+   and **Foot sensor**. Enable verified controls; experimental controls are not needed.
+   Use the default **10-minute** delay and a unique reserved `scene_id` per automation.
+4. Delete/replace automations calling either removed service. Remove any old fallback
+   automation referencing `guard_active` / `guard_pending` or the removed sensor;
+   recovery while a snapshot exists is now built into the blueprint.
+5. Verify a complete on → off → restore cycle, including a switch that was originally
+   off. Existing Foot sensor entity IDs remain unchanged (even if their IDs include
+   “experimental”); only the display name changes. The old integration-disabled default
+   is re-enabled, but a user-disabled entity stays disabled.
+
+The minimal HA-native pattern is below (replace the example entity IDs). Call pause
+when hot water starts and restore after it has been off for the delay. The blueprint
+adds per-switch error isolation and bounded pause attempts to this basic example.
+
+```yaml
+script:
+  toilet_pause:
+    sequence:
+      - condition: template
+        value_template: "{{ states.scene.jomoo_shower_guard_before is none }}"
+      - action: scene.create
+        data:
+          scene_id: jomoo_shower_guard_before
+          snapshot_entities:
+            - switch.toilet_auto_cover
+            - switch.toilet_foot_sensor
+      - action: switch.turn_off
+        target:
+          entity_id:
+            - switch.toilet_auto_cover
+            - switch.toilet_foot_sensor
+  toilet_restore:
+    sequence:
+      - condition: template
+        value_template: "{{ states.scene.jomoo_shower_guard_before is not none }}"
+      - action: scene.turn_on
+        target:
+          entity_id: scene.jomoo_shower_guard_before
+      - action: scene.delete
+        target:
+          entity_id: scene.jomoo_shower_guard_before
+```
+
+**Scenes created with `scene.create` do not survive an HA restart or scene reload.**
+An interrupted pause cannot restore automatically after restart. Use one persistent
+`input_boolean` per switch in your own automation if restart-proof memory is required,
+or check the switches manually. Manual changes during a pause no longer cancel the
+snapshot: the saved states will be restored. Restore is best effort; inspect traces
+and settings after errors. See [HA-native shower guard](#shower-guard-ha-native).
+
 ## Why this exists
 
-Our toilet sits right next to the shower.
+Automatic lid opening can be inconvenient near a shower: movement or steam can open
+the lid while hot water is running. Home Assistant can pause both automatic lid
+opening and the foot sensor, then restore exactly their previous states — a setting
+that was already off stays off. This integration provides the device capabilities;
+the [HA-native blueprint](blueprints/automation/jomoo_ble/shower_guard.yaml) provides
+an optional, user-configured policy.
 
-The JOMOO ZS800J has a handy *automatic lid opening* feature: walk up and the lid lifts by itself. During a shower, though, it misfires — someone standing nearby and drifting steam keep popping the lid open, right next to the running water.
-
-So the first and final goal of this project fits in one sentence:
-
-> **While the water heater is delivering hot water, turn the toilet's automatic lid opening off; when the hot water stops, put it back the way it was.**
-
-"The way it was" matters: if automatic lid opening was already off before the shower, it stays off afterwards.
-
-To get there, Home Assistant first had to really understand this toilet — hence this integration.
-<!-- STORY:END -->
-
-<!-- DEVLOG:START -->
-## How it was built (short version)
-
-1. **Reaching the device.** The toilet speaks Bluetooth only. An M5Stack CoreS3 running ESPHome serves as a Bluetooth proxy next to it: placed far away the signal was about -90 dBm and a connection took over ten seconds; beside the toilet it is about -68 dBm and connects in under a second.
-2. **The official WeChat mini program as the reference.** JOMOO's official controller is a WeChat mini program. We used it as the reference: which protocol revision this model uses and what each status field means — then verified everything with our own **read-only queries and read-back**, field by field, against the mini program and the physical toilet. That turned "guessing a protocol" into "checking against a reference". This repository contains and needs **no vendor code or mini-program files**; the implementation is written independently.
-3. **Step-by-step acceptance on the real device.** Read-only first, then reversible actions, then settings: open/close lid, open/close seat ring, small flush, automatic lid opening off/on — each verified on hardware. Every control frame carries the full settings block, so each write starts from a fresh read and is compared before/after to prove water/seat/dryer temperatures were not silently changed.
-4. **An accidental proof.** During the close-lid test the lid reopened a few seconds later — someone was standing in front of the toilet watching, and automatic lid opening did exactly what it does. That is precisely the problem this project solves.
-5. **Home Assistant.** Every connection makes the toilet beep, and only one central may connect at a time, so the integration does **not** poll by default; it connects briefly on refresh, on an action, or when an automation fires, and disconnects right away.
-6. **Shower guard.** Two services — suspend / resume automatic lid opening — remember the previous state; a blueprint wires in any "hot water is flowing" sensor.
-<!-- DEVLOG:END -->
+The protocol implementation is independent, based on wire observations, read-only
+queries and read-back against the official controller's behaviour. No vendor source
+or mini-program files are included or needed. Hardware checks cover lid/ring actions,
+small flush, automatic lid opening and foot sensor off/on, with other settings unchanged.
 
 ## What you get
 
@@ -39,14 +98,14 @@ To get there, Home Assistant first had to really understand this toilet — henc
   water shortage, abnormal flow, sensor / overheat faults, filter remaining and hours,
   foam liquid low, every settings level, and a last-refresh timestamp.
 - **Verified controls**: open / close lid, open / close seat ring, small flush, and the
-  automatic lid opening switch.
-- **Shower guard**: `jomoo_ble.suspend_auto_cover` / `jomoo_ble.resume_auto_cover`
-  services plus an automation blueprint. While hot water is flowing, automatic lid
-  opening is turned off; afterwards it is restored to exactly what it was.
+  automatic lid opening and foot sensor switches.
+- **HA-native shower guard blueprint**: snapshots one or more switches, pauses them
+  during hot-water use and restores their original values afterwards. Configured in HA,
+  not a service or policy inside this integration.
 - **Experimental controls** (off by default): water / seat / dryer temperature levels,
   rear wash pressure and nozzle position, dryer fan speed, wide-wash level, automatic
   flush, automatic night light, UV water disinfection, close lid before flush, automatic
-  small flush, foot sensor, ambient light, large flush.
+  small flush, ambient light, large flush.
 
 ## Hardware
 
@@ -90,7 +149,7 @@ example. Setup performs one read-only query (one beep).
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| Enable verified controls | off | Lid, seat ring, small flush, automatic lid opening, shower guard |
+| Enable verified controls | off | Lid, seat ring, small flush, automatic lid opening, foot sensor |
 | Enable experimental controls | off | Everything marked *Experimental* below |
 | Automatic refresh interval | 0 (off) | 0, or 300 – 86400 seconds |
 | Persistent live status (`enable_status_stream`) | off | Hold one shared BLE connection; ignore polling while enabled |
@@ -104,7 +163,7 @@ releases Bluetooth. Initial validated E2/EA/E9/FA/E7 queries seed the snapshot; 
 notifications then update existing entities, including Flushing. This is not a refill
 sensor: FA payload[5] bit0 is still unknown.
 
-Stream, refresh, commands and shower guard share the same physical connection and
+Stream, refresh and commands share the same physical connection and
 operation lock. Controls still require a new full query window, preserve other settings,
 write once and verify by read-back; stream caches never supply control settings.
 No periodic query/reconnect or automatic recovery is scheduled. After loss, state is
@@ -140,13 +199,12 @@ until release is confirmed.
 | Open lid / Close lid / Open seat ring / Close seat ring | button | Verified |
 | Small flush | button | Verified |
 | Large flush | button | Experimental, disabled by default |
-| Automatic lid opening | switch | Verified; exposes `guard_active`, `guard_pending`, `guard_previous` |
+| Automatic lid opening, Foot sensor | switch | Verified, enabled in registry by default; config switches gated by verified controls |
 | Automatic flush, automatic night light | switch | Experimental, disabled by default |
-| UV water disinfection, close lid before flush, automatic small flush, foot sensor, ambient light | switch | Experimental, disabled by default |
+| UV water disinfection, close lid before flush, automatic small flush, ambient light | switch | Experimental, disabled by default |
 | Water / seat / dryer temperature level, rear wash pressure, rear nozzle position, dryer fan speed, wide-wash level | number | Experimental, disabled by default (device levels, not °C) |
 | Lid, Seat ring, Lid moving, Seat ring moving, Seated, Flushing | binary sensor | Read-only |
 | Water shortage, Abnormal water flow, Sensor or overheat fault, Filter needs replacement, Foam liquid low | binary sensor | Read-only |
-| Shower guard active | binary sensor | Read-only |
 | Status, Filter remaining (%), Filter used (h), Front wash pressure / nozzle, Last refresh | sensor | Read-only |
 | Raw E2 / FA / E9 / EA / E7 | sensor | Diagnostic, disabled by default |
 
@@ -159,16 +217,24 @@ The ring and lid are linked on this model: opening the ring also opens the lid; 
 the ring leaves the lid open. The automatic lid opening sensor reacts to a person
 standing in front of the toilet, so a lid you just closed may reopen if someone is there.
 
-## Shower guard
+## Shower guard (HA-native)
 
-Import the blueprint:
+Import/update the v0.4.0+ blueprint (same import path):
 
 [![Open your Home Assistant instance and show the blueprint import dialog.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fxiaoyaner0201%2Fha-jomoo-ble%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fjomoo_ble%2Fshower_guard.yaml)
 
-Inputs: a **hot-water-flowing** binary sensor, the toilet's *Automatic lid opening*
-switch and a restore delay (default 3 minutes). Hot water on → suspend; hot water off for
-the delay → resume. Each step retries up to 5 times, 30 s apart, until the
-`guard_active` attribute shows the target.
+Inputs: a **hot-water-flowing** binary sensor, a `switches` list (select **Automatic lid
+opening** and **Foot sensor**), `off_delay` (default **10 minutes**) and a unique reserved
+`scene_id` (default `jomoo_shower_guard_before`, no `scene.` prefix). Enable verified
+controls. Switches must be known on/off before the first snapshot. Do not reuse a scene
+ID or change inputs during a pause.
+
+Hot water on → `scene.create` with `snapshot_entities` once → turn off switches that
+are on. A re-trigger never overwrites the original snapshot. Each switch has separate
+error handling; the automation attempts to reach all-off up to 5 times, 30 s apart,
+stopping early when hot water stops. These are HA automation attempts, not transport
+write retries. Hot water off for the delay → `scene.turn_on` → `scene.delete` (confirmed
+available in HA 2026.9.1), restoring both on and off values.
 
 Use a signal that means hot water is in use, not just that the heater is powered, and
 check that it really changes during a shower: look at its history and make sure the
@@ -176,7 +242,7 @@ automation's *last triggered* is set before relying on it.
 
 ### Tested A.O. Smith signal (corrected)
 
-The maintainer's China-market A.O. Smith gas water heater is added through the community
+A China-market A.O. Smith gas water heater was tested through the community
 [Ai-Link A.O. Smith](https://github.com/mopocv/Ai-Link_A.O.Smith) integration
 (v1.4.0 or newer, which renews its short-lived app token by itself).
 
@@ -186,9 +252,9 @@ a real shower with the fan at about 3000 rpm and 44% burner duty, so the guard n
 triggered. The flow-rate reading is not reliable either: it was once non-zero with no
 tap open.
 
-The working trigger in that home is **zero-cold-water (recirculation) switch on, or fan
-speed above 0**. It also fires on recirculation and other hot-water use, which only
-pauses the lid opening for a while. Replace the placeholder entity ids with your own.
+The verified signal is **zero-cold-water (recirculation) switch on, or fan
+speed above 0**. It also fires on recirculation and other hot-water use, which also
+pauses the selected switches for a while. Replace the placeholder entity ids with your own.
 When both sources are unavailable, the template keeps its previous state instead of
 reading missing data as "hot water off":
 
@@ -207,63 +273,41 @@ template:
           {% endif %}
 ```
 
-Use a **10-minute** restore delay in the blueprint, so the lid does not start opening
-again while you dry off (the blueprint default stays 3 minutes). The cloud data can also
-pause for several minutes at a time.
+The blueprint defaults to a **10-minute** restore delay, so settings stay paused while
+hot-water use winds down. Cloud data can pause for several minutes.
 
-### Restore after a restart or automation reload
+### Recovery and restart limitation
 
-Home Assistant drops a running `for:` timer when it restarts or when the automation is
-saved or reloaded. The guard state survives, but nothing then schedules the restore.
-This fallback checks every 5 minutes and at HA start, and resumes once the signal has
-been off for the same delay. It does not connect to the toilet unless it resumes.
-Replace the entity ids and keep the delay in sync with the blueprint:
+HA drops running `for:` timers on restart or automation reload. The blueprint checks
+at HA start and every 5 minutes: if hot water has been off for the full delay **and the
+snapshot scene still exists**, restore and delete it. An automation-only reload can
+therefore recover while the dynamic scene remains. The recovery branch is not a new
+snapshot and never guesses an old value. Restore also waits until every selected
+switch is available (on/off): HA silently skips unavailable entities, so restoring
+during a Bluetooth drop would delete the snapshot without restoring anything. The
+snapshot is kept and restored by the next recovery check after the toilet returns.
 
-```yaml
-automation:
-  - alias: Toilet shower guard restore fallback
-    mode: single
-    triggers:
-      - trigger: time_pattern
-        minutes: "/5"
-      - trigger: homeassistant
-        event: start
-    conditions:
-      - condition: template
-        value_template: >-
-          {{ is_state('binary_sensor.hot_water_in_use', 'off')
-             and (state_attr('switch.toilet_auto_cover', 'guard_active')
-                  or state_attr('switch.toilet_auto_cover', 'guard_pending'))
-             and now() - states.binary_sensor.hot_water_in_use.last_changed
-                 > timedelta(minutes=10) }}
-    actions:
-      - action: jomoo_ble.resume_auto_cover
-        target:
-          entity_id: switch.toilet_auto_cover
-```
-
-After an HA restart the signal's `last_changed` restarts too, so the fallback can wait
-up to another 10 minutes. The same logic runs in the maintainer's HA; validate these
-examples in your own.
-
-Guard semantics: suspend remembers the current value and only writes *off* if it was on;
-resume only writes *on* if it was on before, and never writes *off*. Changing the switch
-by hand while the guard is active cancels the guard, so your manual choice wins. The
-guard state survives restarts.
+**Dynamic scenes do not survive an HA restart or a scene reload.** A start trigger
+cannot recover a lost snapshot. Check Automatic lid opening and Foot sensor after an
+interrupted pause, or use one persistent `input_boolean` per switch in your own
+restart-proof automation. Unlike the removed integration policy, manual changes do not
+cancel snapshot restoration. Restore is best effort, not transactional: after a write
+failure inspect automation traces and device settings. This blueprint has been tested
+with a fake toilet in real HA; no new complete hardware shower cycle is claimed.
 
 ## Safety model
 
 - Before any write, the integration reads E2, FA, E9 and EA in the same connection and
   refuses unless the toilet is in standby. Lid, ring and flush commands are also refused
   while someone is seated or while the lid or ring is moving.
-- Every control frame carries the full settings block. It is rebuilt from that fresh
-  read, so nothing else changes. After the write, the integration reads back until the
-  target is confirmed. It then compares every other known setting and raises with a
+- Function frames carry the full settings block; short option frames target one
+  setting. Both use fresh reads and preserve unrelated settings. After the write,
+  the integration reads back until the target is confirmed. It then compares every other known setting and raises with a
   before/after diff if anything else moved.
 - Flush commands report "sent, unconfirmed" (logged warning) if the flushing flag is not
   seen within about 6 seconds.
-- Writes are **never retried automatically**: a failed write may still have reached the
-  toilet. No optimistic state is published.
+- The integration **never retries a control write automatically**: a failed write may
+  still have reached the toilet. No optimistic state is published.
 - If a disconnect cannot be confirmed, the integration stops connecting. A failed unload
   requires manual Bluetooth-release checks and an HA restart; reload is not a guarantee.
 - Washing, drying, nozzle cleaning, firmware update and factory reset are not
@@ -290,15 +334,15 @@ real HA adapter, coordinator and entities (including release and manual recovery
 Do not mount a production config or Bluetooth hardware.
 
 ```sh
-python -m unittest discover -s tests -v   # protocol + synthetic BLE + shower guard
+python -m unittest discover -s tests -v   # protocol + synthetic BLE / stream
 python scripts/sync_library.py --check    # bundled lib/ identical to jomoo_ble/
 python scripts/check_repository.py        # compile, links, no real MAC / private IP
 ruff check . && ruff format --check .
 ```
 
 `tests/ha_smoke/smoke_in_ha_container.py` runs the whole integration (config flow,
-entities, services, shower guard, options, diagnostics, unload) inside a real Home
-Assistant Python environment against a fake toilet. Never point it at a production
+entities, services, migration, HA-native blueprint, options, diagnostics, unload) inside
+a real Home Assistant Python environment against a fake toilet. Never point it at a production
 config directory. Protocol details: [docs/protocol.md](docs/protocol.md). Verification
 record: [docs/verification.md](docs/verification.md).
 

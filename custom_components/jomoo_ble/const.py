@@ -16,7 +16,5 @@ MIN_POLL_INTERVAL = 300
 MAX_POLL_INTERVAL = 86400
 
 SERVICE_REFRESH = "refresh"
-SERVICE_SUSPEND = "suspend_auto_cover"
-SERVICE_RESUME = "resume_auto_cover"
 
 STORAGE_VERSION = 1

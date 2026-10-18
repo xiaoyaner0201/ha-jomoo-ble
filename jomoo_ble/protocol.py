@@ -543,7 +543,11 @@ def function_frame(op: Op, settings: WritableSettings) -> bytes:
 
 
 class Option(str, Enum):
-    """Settings changed with the short 0x1F option frame (app-derived, unverified)."""
+    """Short 0x1F option settings.
+
+    Foot sensor off/on is hardware-verified with read-back and unchanged settings.
+    Other option writes remain app-derived and unverified on hardware.
+    """
 
     UV_DISINFECTION = "uv_disinfection"
     CLOSE_LID_BEFORE_FLUSH = "close_lid_before_flush"

@@ -20,5 +20,9 @@ Report suspected vulnerabilities privately through GitHub's "Report a vulnerabil
 public issue. Do not send reports to JOMOO or Home Assistant as if they maintain this
 project. No support SLA is promised.
 
-The shower guard must be driven by a signal that means hot water is actually flowing;
-it preserves the prior setting and yields to manual changes.
+Cross-device policy belongs in HA automations, not in the device integration. The
+optional HA-native blueprint needs a signal meaning hot water is in use, not heater
+power. Dynamic scene snapshots do not survive HA restart or scene reload, and manual
+changes do not cancel restoration. Restore is best effort; check traces and settings
+after errors. For restart-proof memory, use persistent helpers per switch or inspect
+settings manually after an interrupted pause.

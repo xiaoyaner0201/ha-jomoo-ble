@@ -5,13 +5,3 @@ refresh:
       selector:
         device:
           integration: jomoo_ble
-suspend_auto_cover:
-  target:
-    entity:
-      integration: jomoo_ble
-      domain: switch
-resume_auto_cover:
-  target:
-    entity:
-      integration: jomoo_ble
-      domain: switch

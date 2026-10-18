@@ -14,7 +14,6 @@ from jomoo_ble.client import (
     SetSettings,
     VerificationError,
 )
-from jomoo_ble.guard import GuardState, ShowerGuard
 from jomoo_ble.protocol import Option, build_frame, parse_frame
 
 E2 = bytes.fromhex("f3f40b2192e24a52b3450900003dfc")
@@ -72,6 +71,10 @@ class Device:
             p5 = parse_frame(self.fa).payload[5]
             p5 = p5 | 0x20 if parsed.payload[1] == 0x40 else p5 & ~0x20
             self.fa = with_byte(self.fa, 5, p5)
+        elif parsed.command == 0x1F and parsed.payload[0] == 0x24:
+            p7 = parse_frame(self.fa).payload[7]
+            p7 = p7 | 0x20 if parsed.payload[1] == 0x01 else p7 & ~0x20
+            self.fa = with_byte(self.fa, 7, p7)
         if self.corrupt_on_write:
             self.e2 = with_byte(self.e2, 1, 0x55)  # seat temperature 5 instead of 2
             self.fa = with_byte(self.fa, 1, 0x55)
@@ -172,6 +175,31 @@ class SessionTests(unittest.TestCase):
         snap = run(manager(device).command(SetOption(Option.UV_DISINFECTION, True)))
         self.assertTrue(snap.extended.uv_disinfection)
 
+    def test_foot_sensor_round_trip_and_noop(self):
+        device = Device()
+        session = manager(device)
+        for enabled, p7, value in ((False, 0x13, 0x02), (True, 0x33, 0x01)):
+            with self.subTest(enabled=enabled):
+                snap = run(session.command(SetOption(Option.FOOT_SENSOR, enabled)))
+                self.assertEqual(snap.extended.foot_sensor, enabled)
+                self.assertEqual(snap.extended.raw[7], p7)
+                self.assertEqual(parse_frame(device.writes[-1]).payload, bytes((0x24, value)))
+        self.assertEqual(len(device.writes), 2)
+        run(session.command(SetOption(Option.FOOT_SENSOR, True)))
+        self.assertEqual(len(device.writes), 2)
+
+    def test_foot_sensor_keeps_write_safety_guarantees(self):
+        for device, error in (
+            (Device(write_error=True), SessionError),
+            (Device(ignore_writes=True), VerificationError),
+            (Device(corrupt_on_write=True), VerificationError),
+        ):
+            with self.subTest(error=error):
+                with self.assertRaises(error):
+                    run(manager(device).command(SetOption(Option.FOOT_SENSOR, False)))
+                self.assertEqual(len(device.writes), 1)
+                self.assertEqual(device.active, 0)
+
     def test_refuse_when_busy_seated_or_moving(self):
         cases = {
             "busy": Device(e9=with_byte(E9, 3, 0x20)),
@@ -261,96 +289,6 @@ class SessionTests(unittest.TestCase):
         run(scenario())
         self.assertEqual(device.max_active, 1)
         self.assertEqual(device.connections, 3)
-
-
-class MemoryStore:
-    def __init__(self, data=None):
-        self.data = data
-        self.saves = 0
-
-    async def load(self):
-        return self.data
-
-    async def save(self, data):
-        self.saves += 1
-        self.data = dict(data)
-
-
-class GuardTests(unittest.TestCase):
-    def guard(self, device, data=None):
-        store = MemoryStore(data)
-        guard = ShowerGuard(manager(device), store)
-        run(guard.load())
-        return guard, store
-
-    def test_suspend_then_resume_when_previously_on(self):
-        device = Device()
-        guard, store = self.guard(device)
-        run(guard.suspend())
-        self.assertEqual(guard.state, GuardState(active=True, previous=True))
-        self.assertEqual(store.data, {"active": True, "pending": False, "previous": True})
-        self.assertEqual(len(device.writes), 1)
-        run(guard.resume())
-        self.assertEqual(guard.state, GuardState())
-        self.assertEqual(len(device.writes), 2)
-        self.assertEqual(parse_frame(device.writes[-1]).payload[0] & 0x08, 0x08)
-
-    def test_previously_off_never_written(self):
-        device = Device(e2=with_byte(E2, 0, 0x42), fa=with_byte(FA, 0, 0x42))
-        guard, _ = self.guard(device)
-        run(guard.suspend())
-        self.assertEqual(guard.state, GuardState(active=True, previous=False))
-        run(guard.resume())
-        self.assertEqual(device.writes, [])
-        self.assertEqual(device.connections, 1)  # resume needed no connection at all
-
-    def test_already_active_does_not_connect(self):
-        device = Device()
-        guard, _ = self.guard(device, {"active": True, "previous": True})
-        run(guard.suspend())
-        self.assertEqual(device.connections, 0)
-
-    def test_resume_inactive_is_noop(self):
-        device = Device()
-        guard, _ = self.guard(device)
-        run(guard.resume())
-        self.assertEqual(device.connections, 0)
-
-    def test_failed_resume_keeps_guard(self):
-        device = Device(e2=with_byte(E2, 0, 0x42), fa=with_byte(FA, 0, 0x42), ignore_writes=True)
-        guard, _ = self.guard(device, {"active": True, "previous": True})
-        with self.assertRaises(VerificationError):
-            run(guard.resume())
-        self.assertEqual(guard.state, GuardState(active=True, previous=True))
-
-    def test_failed_suspend_remembers_original_for_retry(self):
-        device = Device(ignore_writes=True)
-        guard, _ = self.guard(device)
-        with self.assertRaises(VerificationError):
-            run(guard.suspend())
-        self.assertEqual(guard.state, GuardState(pending=True, previous=True))
-        # The write actually landed late; a retry must not record "was off".
-        device.ignore_writes = False
-        device.e2 = with_byte(E2, 0, 0x42)
-        device.fa = with_byte(FA, 0, 0x42)
-        run(guard.suspend())
-        self.assertEqual(guard.state, GuardState(active=True, previous=True))
-        run(guard.resume())
-        self.assertTrue(parse_frame(device.writes[-1]).payload[0] & 0x08)
-
-    def test_refused_suspend_keeps_state_clean(self):
-        device = Device(e9=with_byte(E9, 3, 0x20))
-        guard, _ = self.guard(device)
-        with self.assertRaises(CommandRefused):
-            run(guard.suspend())
-        self.assertFalse(guard.state.active)
-
-    def test_cancel(self):
-        device = Device()
-        guard, store = self.guard(device, {"active": True, "previous": True})
-        run(guard.cancel())
-        self.assertEqual(guard.state, GuardState())
-        self.assertEqual(store.data["active"], False)
 
 
 if __name__ == "__main__":

@@ -37,10 +37,5 @@ async def async_get_config_entry_diagnostics(hass, entry) -> dict:
         },
         "last_refresh": coordinator.last_refresh.isoformat() if coordinator.last_refresh else None,
         "last_warning": coordinator.last_warning,
-        "guard": {
-            "active": coordinator.guard_state.active,
-            "pending": coordinator.guard_state.pending,
-            "previous": coordinator.guard_state.previous,
-        },
         "frames": frames,
     }
